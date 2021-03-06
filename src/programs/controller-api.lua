@@ -303,7 +303,7 @@ end
 function clusterd.add_namespace(name)
    assert(name == nil or type(name) == "string",
           "namespace label must be string, if given")
-   api.tx(
+   return api.tx(
       function ()
          res, err = api.run([[SELECT (MAX(ns_id) + 1) AS id FROM namespace]])
          if err ~= nil or #res ~= 1 then
