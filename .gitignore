@@ -1,5 +1,6 @@
 *.lua.c
 *.sql.c
+Makefile
 *~
 vgcore*
 valgrind*

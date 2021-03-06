@@ -17,7 +17,7 @@ function(preprocess_rc out_var)
   set(result)
   foreach(in_f ${ARGN})
     set(out_f ${in_f})
-    set(out_f "${CMAKE_CURRENT_BINARY_DIR}/${out_f}.c")
+    set(out_f "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/${out_f}.c")
     get_filename_component(name_f ${in_f} NAME)
     string(REGEX REPLACE "[^A-Za-z0-9_]" "_" name_f ${name_f})
     add_custom_command(OUTPUT "${out_f}"
