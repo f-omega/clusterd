@@ -1,3 +1,5 @@
+*.lua.c
+*.sql.c
 *~
 vgcore*
 valgrind*
