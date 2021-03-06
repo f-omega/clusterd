@@ -1,3 +1,4 @@
+nix-hash
 *.lua.c
 *.sql.c
 Makefile

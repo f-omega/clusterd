@@ -23,7 +23,7 @@ function(preprocess_rc out_var)
     add_custom_command(OUTPUT "${out_f}"
       COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rc ${name_f} ${in_f} ${out_f}
       DEPENDS ${in_f}
-      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
       COMMENT "Creating preprocessed rc file ${out_f}"
       VERBATIM
     )
