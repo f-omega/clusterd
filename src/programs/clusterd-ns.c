@@ -40,7 +40,8 @@ static const char *list_one_lua =
   "ns = clusterd.get_namespace(params.nameorid)\n"
   "clusterd.output(format_namespace(ns))\n";
 static const char *add_one_lua =
-  "clusterd.add_namespace(params.name)\n";
+  "ns_id = clusterd.add_namespace(params.name)\n"
+  "clusterd.output(ns_id)\n";
 static const char *delete_one_lua =
   "clusterd.delete_namespace(params.nameorid)\n";
 static const char *list_all_lua =

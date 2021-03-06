@@ -320,7 +320,7 @@ function clusterd.add_namespace(name)
          if err ~= nil then
             error("Could not add namespace: " .. err)
          else
-            output(ns_id)
+            return ns_id
          end
       end
    )

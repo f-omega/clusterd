@@ -144,6 +144,11 @@ int main(int argc, char *const *argv) {
 
   // If save is set, then transmit sha256 sum of file
   if ( save ) {
+    if ( !script_path ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "If you want to save the command, you must provide a file");
+      return 3;
+    }
+
     //    err = clusterctl_invoke_sha256(&ctl, _);
     return 3;
   } else {
@@ -156,7 +161,20 @@ int main(int argc, char *const *argv) {
 
   if ( err == CLUSTERCTL_NEEDS_SCRIPT ) {
     if ( script_path ) {
-      return 2;
+      int fd = open(script_path, O_RDONLY);
+      if ( fd < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open script file %s: %s", script_path, strerror(errno));
+        return 1;
+      }
+
+      err = clusterctl_pipe_script(&ctl, fd);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send script from file %s: %s", script_path, strerror(errno));
+        close(fd);
+        return 1;
+      }
+
+      close(fd);
     } else {
       err = clusterctl_pipe_script(&ctl, STDIN_FILENO);
     }
