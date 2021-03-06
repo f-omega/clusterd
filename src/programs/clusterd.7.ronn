@@ -1,0 +1,147 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd(7) -- Linux cluster service supervision suite
+=====================================================
+
+Clusterd (rhymes with Custard) is a service supervision suite meant to
+manage long-running, highly available services on large numbers of
+bare-metal or cloud Linux servers. Here are what various pieces of
+clusterd does:
+
+* Keeps a strongly consistent state of all services (and their
+  locations) in a cluster
+* Maintain information on cluster node health
+* Load balance services across machines on a cluster as resource usage
+  patterns change
+* Restart services when they go down, either due to a service error or
+  a hardware fault or network partition, so that the service *becomes
+  available* again (this may mean starting the service on a new node)
+* Migrate services from one node to another to enable the ad-hoc
+  removal and addition of nodes
+* Report on exceptional events in the system to the system
+  administrator
+* Provide mechanisms to reliably collect log output no matter the
+  machine
+
+By design, clusterd does not:
+
+* Have anything to do with Linux namespaces
+* Provide network isolation for service workloads
+* Provide service discovery
+* Know what a container is
+
+All these things are really good things for other software systems to
+worry about. Clusterd is designed to work well with such systems.
+
+Ultimately, clusterd is designed to *get out of your way*. You tell it
+about a service and its requirements, and then you tell it you want it
+to run on some node, and clusterd will make sure that it does so no
+matter what happens to that node or if the service happens to die
+every once in a while.
+
+## ARCHITECTURE
+
+Clusterd is not a monolith. It is a set of small,
+easily-understandable C tools, bash scripts, and a bit of Lua that can
+be combined together to produce a full-featured system. It is intended
+that users modify the programs to suite their needs. The process of
+deploying Clusterd is up to the end-user. We recommend using a
+complete Clusterd distribution like Cherry.
+
+To deploy clusterd, you will need:
+
+* A set of computers running Linux. They can be super powerful
+  computers in a data center or Raspberry Pis or a mix of the two. If
+  it can run Linux and has a few MBs of RAM, clusterd will get along
+  just fine.
+* An odd number of computers designed as *controllers*. These are the
+  machines that will dedicate a tiny portion of their disks to store
+  cluster-wide state in a distributed manner
+
+You will probably need:
+
+* Shared storage or another means of distributing service binaries to
+  your nodes
+* A secured internal network for internal node-to-node communication
+* Something to do after you set up clusterd, because it's really easy
+
+### SETTING UP
+
+Before we begin, you need to ensure that every node has a `clusterd`
+user with a static, fixed uid and a `clusterd` group with a static,
+fixed gid. Also make sure that each machine has a (unique, hopefully
+elliptic curve-based) SSH identity configured for this user so that
+passwordless ssh between `clusterd` users on various nodes works. How
+you set this up is up to you. We recommend using NixOS.
+
+First, on the machines you want to set up as a controller, run the
+clusterd-conttroller(1) program.
+
+```
+clusterd-controller -j 1/CTL1ADDR -j 2/CTL2ADDR ... -j N/CTLNADDR K/MYADDR -j SERVICEADDR /path/to/state/dir
+```
+
+where CTL1ADDR to CTLNADDR are the addresses(IP:port pairs) of
+controller nodes 1 through N and K is the node id and address/port
+pair of the current node.
+
+SERVICEADDR should be an internal IP/port pair. It's where any node in
+your network may connect to access controller services. Finally,
+`clusterd-controller` accepts the path to a state directory, which is
+typically something like `/var/lib/clusterd`, but you should feel free
+to put it in any permanent filesystem. This directory should not get
+very large.
+
+### ADDING NODES
+
+Now, on every machine, set the CLUSTERD_CONTROLLERS environment
+variable to a comma-separated list of every SERVICEADDR you defined
+above.
+
+Then, again on every machine, run clusterd-rollcall(1).
+
+### DEPLOY A SERVICE
+
+That's it! Now, from any node in your cluster (assuming the
+CLUSTERD_CONTROLLERS environment variable is set), you can run
+
+```
+clusterd-start /path/to/executable arguments
+```
+
+This will cause clusterd to launch the given executable on some system
+somewhere in the cluster. Although this command will return pretty
+quick, somewhere in your private cloud, a little service will be
+runnning that will never, ever stop.
+
+You can put the service to rest by doing
+
+```
+clusterd-stop SRVID
+```
+
+Where SRVID is the output of the `clusterd-start` program above.
+
+### RELAX
+
+That's it. You can now deploy services with automatic load-balancing
+anywhere in your cluster.
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLERS`:
+   A comma-separated list of all controllers in this configuration
+* `CLUSTERD_CONFIG_DIR`:
+   A path to the directory containing the clusterd configuration
+* `CLUSTERD_RUNTIME_DIR`:
+   A path to a writable directory where clusterd can place files
+   needed at run-time
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd-controller(1), clusterd-launch(1), clusterd-rollcall(1),
+clusterd-supervise(1), clusterd-monitor(1), clusterd-exec(1)

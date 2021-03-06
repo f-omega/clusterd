@@ -1,0 +1,4 @@
+zone: The availability zone for this data center
+dc: The data center this rack resides in
+rack: The physical rack this node resides in
+slot: The slot this node is in

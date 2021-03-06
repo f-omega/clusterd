@@ -1,0 +1,21 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-ctlcall(7) -- clusterd controller calls
+================================================
+
+clusterd-controller(1) is the 'kernel' of a clusterd system. It
+responds to requests, called *ctlcall*s, and maintains a consistent
+global state of the entire cluster. Ctlcalls are a plain text
+representation of changes we want made to a cluster
+configuration. They are documented here.
+
+
+## CTLCALLS
+
+* `nscreate label1=value1...`:
+  Create a new namespace, with the given metadata
+* `nssearch label1=criteria1...`:
+  Find namespaces based on given metadata
+* `nsget <namespace-id>`:
+  Get information on a namespace based on the namespace id
+

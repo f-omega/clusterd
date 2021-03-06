@@ -1,0 +1,85 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-service-doctor(1) -- fix broken clusterd services
+==========================================================
+
+## SYNOPSIS
+
+`clusterd-service-doctor` -vh -n NAMESPACE-ID -s SERVICE-ID
+  -i INSTANCE-ID [-m ADDRESS:PORT...]
+
+## DESCRIPTION
+
+`clusterd-service-doctor` fixes broken clusterd(7) service
+instances. It is typically spawned by clusterd-monitor(1) when a
+service instance is detected as down. Services can be down for a
+number of reasons, including:
+
+* Service-level failures (i.e., a virtual machine triple faults, or a
+  container init process exits)
+* Node failures (i.e., an entire node goes down to a hardware issue)
+* Network failures (i.e., a partition has occurred between the monitor
+  node and the node running the instance)
+
+`clusterd-service-doctor` attempts to fix these issues and restore the
+service instance. Note that `clusterd-service-doctor` will not take
+any step to restore a service explicitly marked as killed in the
+controller database.
+
+Actions that `clusterd-service-doctor` may take are:
+
+* Restarting the service (if the scheduled node is still running and
+  according to the service restart policy)
+* Moving the service to a new node (if the scheduled node cannot be
+  contacted)
+
+In order to ensure high-availability in the case of an outage,
+`clusterd-service-doctor` will spawn additional copies of itself on a
+random selection of nodes. Multiple copies of
+`clusterd-service-doctor` will not trample on one another and will be
+used to make sure the service is stood up again, even if this node
+goes down.
+
+It is worth noting that there are some errors
+`clusterd-service-doctor` cannot fix. For example, if the node is
+decided to be down due to a network partition, and the monitor host
+finds itself in the minority, then `clusterd-service-doctor` will be
+unable to contact the controller, and thus unable to move the service
+to a new host. This ought to be okay. In the case the monitor is in
+the minority network partition, the majority partition (which, again,
+is the canonical source of truth) will declare all services running in
+the minority partition (including any monitors) to be dead. In that
+case, the majority monitors will start `clusterd-service-doctors` on
+majority hosts to stand up all the services that found themselves in
+the minority. When the network partition goes away, the cluster will
+rebalance itself according to the rebalancing policy.
+
+## OPTIONS
+
+* `-n` <namespace>:
+  The namespace ID of the instance to fix
+* `-s` <service>:
+  The service ID of the instance to fix
+* `-m` <address>:
+  The address and the port of another monitor mode this instance had
+  been sending monitor requests to. These monitors will be contacted
+  to see if they can ping the service. If they can, but we cannot,
+  then we will decide that we are in some kind of network partition. A
+  warning will be emitted.
+* `-v`
+  Display verbose debug output
+* `-h`
+  Print the help section
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLER`:
+  A comma-separated list of all controllers on this clusterd(7) configuration
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-monitor(1), clusterd-service(1)

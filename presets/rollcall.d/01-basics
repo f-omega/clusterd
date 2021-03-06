@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+if [ ! -z ${CLUSTERD_DISCOVERY+x} ]; then
+    echo "CPU core count"
+elif [ ! -z ${CLUSTERD_HELP+x} ]; then
+    # DO nothing
+    :
+else
+    echo "Collecting CPU and Memory information" >&2
+    NPROCS=$(getconf _NPROCESSORS_ONLN)
+    echo -e "cpu\t${NPROCS}"
+
+    MEM=$(free --mega -t | grep "Total:" | awk -F ' ' '{print $2}')
+    echo -e "memory\t${MEM}"
+fi

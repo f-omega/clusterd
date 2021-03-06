@@ -1,0 +1,53 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-monitor(1) -- clusterd high-availability monitoring daemon
+===================================================================
+
+## SYNOPSIS
+
+`clusterd-monitor` -vh [-P PORT] [-b ADDR] [-n ATTEMPTS] [-t TIMEOUT]
+
+## DESCRIPTION
+
+`clusterd-monitor` is the high-availibility monitoring daemon of the
+clusterd(7) suite. It listens on a UDP socket for monitor requests
+from service instances. Instances send these requests to indicate that
+they're still active. If an active service fails to send a request
+within a given timeframe, the service will be considered *degraded*. A
+service will enter the active state again once a configurable number
+of monitor requests occur on time. Otherwise it will remain in the
+degraded state. A degraded service that receives no monitor requests
+for some time will be deleted. A clusterd-service-doctor(1) job will
+be started to attempt to repair the service.
+
+## OPTIONS
+
+* `-P` <port>:
+  Bind the given port for subsequent `-b` options. If no `-b` options
+  are given then, bind all interfaces on this host
+* `-b` <addr>:
+  Bind the given interface on the host. If address is `0.0.0.0` or
+  `::`, then all interfaces are bound.
+* `-n` <number>:
+  The number of consecutive monitor requests that must be received on
+  time before a service will be considered active again.
+* `-t` <seconds>:
+  The max amount of time a service may remain in the degraded state
+  before being considered unresponsive and starting the service doctor
+* `-v`:
+  Display verbose debug output
+* `-h`:
+  Print the help section
+
+## ENVIRONMENT
+
+* `CLUSTERD_SERVICE_DOCTOR`:
+  The path to the clusterd-service-doctor(1) executable
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-service-doctor(1)

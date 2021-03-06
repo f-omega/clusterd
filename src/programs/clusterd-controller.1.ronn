@@ -1,0 +1,73 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-controller(1) -- clusterd controller daemon
+====================================================
+
+## SYNOPSIS
+
+`clusterd-controller` -vh [-j ADDRESS...] [-S SRVADDR] [bind address] /path/to/state/dir
+
+## DESCRIPTION
+
+`clusterd-controller` implements the control plane of a clusterd(7)
+deployment. The controller is responsible for maintaining a consistent
+view of all cluster entities, such as namespaces, services, service
+instances and nodes.
+
+Every clusterd(7) deployment should have an odd number of nodes
+running `clusterd-controller`. The controller is an integral part of
+the clusterd(7) system. If it goes down, then no new services can be
+added, downed instances will not heal, and the cluster will be unable
+to re-balance. A small number of controllers should capable of
+handling even the largest clusters. It is recommended that you run no
+more than 7 `clusterd-controller` instances. This allows you to
+tolerate the loss of at least 3 controller nodes. For
+high-availability, it is recommended that you run at least three. The
+smallest clusters may be able to get away with running one instance of
+`clusterd-controller`, keeping in mind the disclaimers below.
+
+`clusterd-controller` uses the Raft algorithm to maintain a consistent
+cluster state in spite of network partitions and node downtime. The
+Raft algorithm provides guaranteed strong consistency, but not
+availability. Thus, if you are trying to run an operation that will
+update cluster state but there is a network partition, you may not be
+able to make your update until the network partition heals.
+
+Small downtimes of `clusterd-controller` should not impact a running
+cluster. You can safely kill all controllers and restart them, and the
+cluster should mostly recover on its own. However, any operation that
+needs to modify cluster state will fail. Administrators should make
+sure that an odd number of `clusterd-controller` instances are always
+running.
+
+`clusterd-controller` uses the Raft implementation from Canonical
+(https://github.com/canonical/raft) to ensure data consistency.
+
+## OPTIONS
+
+* `-j` <addr>:
+   For bootstrapping a node, supply the `nodeid/addr:port` combination
+   of all other nodes in the cluster. Alternatively, supply none, and
+   use clusterd-add-controller(1) and clusterd-rm-controller(1) to add
+   and remove nodes.
+* `-S` <addr>:
+   The address on which to provide the core controller
+   service. Typically, all controllers will offer this service on an
+   internal IP.
+* `-v`:
+  Display verbose debug output
+* `-h`:
+  Print the help section
+
+## ENVIRONMENT
+
+`clusterd-controller` does not respond to any environment variables.
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd(1), clusterd-status(1), clusterd-namespaces(1), clusterd-service(1),
+clusterd-nodes(1), clusterd-migrate(1), clusterd-launch(1), clusterd-supervise(1)

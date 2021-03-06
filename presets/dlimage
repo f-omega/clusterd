@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+set -e
+
+# This is an example strict that demonstrates how to write a dlimage
+# script. The script chooses a download method based on the URL scheme
+# given in argument 1.
+#
+# Supported schemes are:
+#
+#    - local:file          - local file
+#    - ssh:user@host:file  - remote file
+#    - nix:store-path      - nix store path
+#    - http:blah, ftp:blah - downloaded with cURL
+
+IMAGE="$1"
+OUTPUT="$2"
+
+remove_temporary() {
+    echo "Would remove $1"
+}
+
+make_temp_image() {
+    TMP=$(mktemp -d -p "$CLUSTERD_IMAGES" img-XXXXX)
+
+    trap "remove_temporary $TMP" EXIT
+
+    echo "$TMP"
+}
+
+hash_directory() {
+    tar --sort=name --owner=root:0 --group=root:0 --mtime='1970-01-01' -c "$1" | sha256sum | awk '{print $1}'
+}
+
+log() {
+    echo "$@" >&2
+}
+
+try_directory() {
+    HASH=$(hash_directory "$1")
+
+    log "Downloaded directory $HASH to $1..."
+
+    DEDUP="$CLUSTERD_IMAGES/$HASH"
+    if [ ! -d "$DEDUP" ]; then
+        log "Image does not exist"
+        mv "$1" "$DEDUP"
+    else
+        log "Image $DEDUP already exists"
+    fi
+
+    ln -s "$DEDUP" "$OUTPUT"
+}
+
+download_ssh() {
+    TMP=$(make_temp_image)
+
+    log "Downloading $IMAGE to $TMP"
+    scp -r "$IMAGE" "$TMP"
+
+    # Hash directory. If the image does not exist add it to
+    # $CLUSTERD_IMAGES, otherwise delete temp
+    try_directory "$TMP"
+}
+
+download_local() {
+    if [ -d "$IMAGE" ]; then
+        ln -s "$IMAGE" "$OUTPUT"
+    else
+        log "$IMAGE does not exist"
+        exit 1
+    fi
+}
+
+download_nix() {
+    IMAGE=$(echo "$IMAGE" | sed 's/^nix://g')
+
+    log "Adding store path $IMAGE"
+    nix-store --realise "$IMAGE" --add-root "$OUTPUT" --indirect
+}
+
+case "$1" in
+    nix:*) download_nix   ;;
+    ssh:*) download_ssh   ;;
+    *)     download_local ;;
+esac

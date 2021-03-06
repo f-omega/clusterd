@@ -1,0 +1,51 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-supervise(1) -- clusterd service host
+============================================
+
+## SYNOPSIS
+
+`clusterd-service` -vhf -n NAMESPACE-ID -s SERVICE-ID
+  [-m ADDRESS:PORT...] /path/to/service/directory
+
+## DESCRIPTION
+
+The `clusterd-service` daemon hosts the clusterd(7) service specified
+by the service directory. The service directory should follow the
+clusterd-service(7) directory layout.
+
+Upon startup `clusterd-service` will parse and apply the options in
+the `options` file (see clusterd-options(7) for more information on
+the format of this file). Then, it will launch the `prepare` script,
+which should download any dependencies for the service. If `prepare`
+fails, it will be launched according to the retry policy. Once
+`prepare` succeeds, the `start` script is called and a new service
+instance is registered in the controller with the given monitors.
+
+## OPTIONS
+
+* `-n` <namespace>:
+  The namespace ID of this instance
+* `-s` <service>:
+  The service ID to run in this instance
+* `-m` <address>:
+  The colon-separated address and port of a monitor node this service
+  should send monitor requests to. You must specify at least one
+  monitor, and it must be on a remote machine, unless `-f` is specified
+* `-f`:
+  Run the service container no matter what. Useful for testing.
+* `-v`:
+  Display verbose debug output
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLER`:
+   A comma-separated list of all controllers on this clusterd(7) configuration
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-monitor(1), clusterd-launch(1)

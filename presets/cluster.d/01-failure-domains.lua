@@ -1,0 +1,1 @@
+clusterd.set_failure_domains

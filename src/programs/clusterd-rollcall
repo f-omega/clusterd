@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+# This is the 'roll call' script. Every node on the cluster executes
+# this script when it wishes to join the cluster and whenever its
+# configuration changes. You may want to configure this as a udev rule
+# if you're doing things like hotplugging hard drives, to
+# automatically register the devices. It should also run at
+# boot. Custom scripts should be placed in $CLUSTERD_CONFIG_DIR/rollcall.d
+
+set -e
+
+CLUSTERD_CONFIG_DIR=${CLUSTERD_CONFIG_DIR:-/etc/clusterd/}
+CLUSTERD_BIN=${CLUSTERD_BIN:-}
+
+run_all() {
+    run-parts ${CLUSTERD_CONFIG_DIR}/rollcall.d
+}
+
+usage() {
+    echo "clusterd-rollcall -- clusterd rollcall program"
+    echo "Usage: clusterd-rollcall -vh -i ID -H HOSTNAME -A ADDRESS"
+    echo
+    echo "Options:"
+    echo "   -i NODEID       Override the default node ID selection"
+    echo "   -H HOSTNAME     Override the default hostname selection"
+    echo "   -A ADDRESS      Override the default IP selection"
+    echo "   -v              Enable verbose debug output"
+    echo "   -h              Print this help menu"
+    echo
+    echo "Module options:"
+    CLUSTERD_HELP=1 run_all
+    echo
+    echo "Resources collected:"
+    CLUSTERD_DISCOVERY=1 run_all | sort | awk '{print "  *",$0}'
+    echo
+    echo "Please report bugs to support@f-omega.com"
+}
+
+while (($#)); do
+    case $1 in
+        -h)
+            usage >&2
+            exit 0
+            ;;
+        -v)
+            export CLUSTERD_VERBOSE=1
+            ;;
+        -i)
+            NODE_ID=$2
+            shift
+            ;;
+        -H)
+            NODE_HOSTNAME=$2
+            shift
+            ;;
+        -A)
+            NODE_ADDRESS=$2
+            shift
+            ;;
+    esac
+    shift
+done
+
+if [ -z ${NODE_ADDRESS+x} ]; then
+    for a in $(getent ahosts examples.com | awk '{print $1}'); do
+        ADDR=$(ip route get $a | awk '{print $7}')
+        if [ $? -eq 0 ]; then
+            NODE_ADDRESS="$ADDR"
+        fi
+    done
+
+    if [ -z ${NODE_ADDRESS+x} ]; then
+        echo "Could not determine local IP" >&2
+        exit 1
+    fi
+fi
+
+if [ -z ${NODE_HOSTNAME+x} ]; then
+    NODE_HOSTNAME=$(hostname)
+fi
+
+if [ -z ${NODE_ID+x} ]; then
+    MACS=$(ip addr show | grep "link/ether" | awk '{print $2}' | sort | uniq | paste -sd ',')
+    CLUSTERD_ID_NS="564c960b-4720-42e4-a738-55d25b155769" # UUID namespace for our node ids
+    NODE_ID=$(uuidgen -n "$CLUSTERD_ID_NS" -N "$MACS" -m)
+fi
+
+collect_resources() {
+     run_all | \
+        awk '{printf("%s=%s\n", $1, $2)}' | \
+        paste -sd ','
+}
+
+make_node_update() {
+    # TODO explicitly parse the location file
+
+    cat <<EOF
+clusterd.update_node("${NODE_ID}", {
+  hostname="${NODE_HOSTNAME}",
+  ip="${NODE_ADDRESS}",
+  failure_domains={ $(cat "$CLUSTERD_CONFIG_DIR/location") },
+  resources={
+    $(collect_resources)
+  }})
+EOF
+}
+
+make_node_update | ${CLUSTERD_BIN}clusterctl

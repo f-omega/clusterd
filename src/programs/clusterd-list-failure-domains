@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+$CLUSTERD_PATH/clusterctl 

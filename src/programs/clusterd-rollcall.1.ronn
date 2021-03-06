@@ -1,0 +1,96 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-rollcall(1) -- clusterd node attendance script
+=======================================================
+
+## SYNOPSIS
+
+`clusterd-rollcall` -vh [-i ID] [-H HOSTNAME-OVERRIDE] [-A IP-OVERRIDE]
+
+## DESCIRPTION
+
+The `clusterd-rollcall` script collects information about the current
+node's resources and sends it to the clusterd-controller(1). You
+should call `clusterd-rollcall` on every node you want to participate
+in your cluster. Its actions are idempotent, and you can call it as
+often as you'd like. To reduce unnecessary network traffic and CPU
+usage though, it's best to limit it to the following circumstances:
+
+* Upon boot, to register the node as being alive
+* Upon a device change (such as hard drive, CPU, or memory
+  hotplug). It is typically safe to register it to run in a catch-all
+  udev rule
+* Upon changes to the node's configuration (hostname or IP)
+
+## EXTENSIBILITY
+
+`clusterd-rollcall` is meant to be used as a base off of which
+implementors build their own custom roll call scripts. By default,
+`clusterd-rollcall` will run all scripts in
+`$CLUSTERD_CONFIG_DIR/rollcall.d`. These scripts should collect system
+resource inventory and report them to stdout as tab-separated values
+of the form:
+
+```
+resource-name <TAB> numeric-value
+```
+
+The resource names should be the identifiers of resources already
+created in the clusterd-controller.
+
+The clusterd source distribution comes with script examples in the
+`presets` directory that contain scripts to collect Linux CPU data,
+memory, and virtualization support. You should define additional
+scripts as needed.
+
+Scripts should send their debug output to stderr. If the
+`CLUSTERD_VERBOSE` environment variable is set, then verbose debug
+output of resource discovery should be sent to stderr.
+
+If the `CLUSTERD_HELP` environment variable is set, a help menu ought
+to be printed to stdout.
+
+If the `CLUSTERD_DISCOVERY` environment variable is set, summary of
+the kinds of resources collected ought to be printed to stdout.
+
+The environment variable `CLUSTERD_OPTIONS` is set to the entirety of
+the `clusterd-rollcall` command line for scripts to parse as they see
+fit.
+
+`$CLUSTERD_CONFIG_DIR/rollcall.d` scripts are run in alphabetical order. Use
+whatever system you'd like to order them.
+
+## OPTIONS
+
+* `-i` <ID>:
+  By default, the node will be registered under a unique ID generated
+  based off of the MAC address of the interface serving the node
+  IP. This ID will be stored in `$CLUSTERD_CONFIG_DIR/id`. Use this option
+  to override that behavior.
+* `-h` <HOSTNAME>:
+  By default, the node hostname will be derived using the hostname(1)
+  command. If you want to set a custom hostname for whatever reason,
+  then use this.
+* `-A` <IP-OVERRIDE>:
+  By default, `clusterd-rollcall` will determine the node IP by using
+  the route used to connect to the clusterd controllers (as given in
+  the `CLUSTERD_CONTROLLERS` environment variable, see below).
+* `-v`:
+  Display verbose debug output
+* `-h`:
+  Print help, including help for any installed modules
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLER`:
+  A comma-separated list of all controllers in this clusterd(7) configuration
+* `CLUSTERD_CONFIG_DIR`:
+  A directory containing the clusterd configuration
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-controller(1)

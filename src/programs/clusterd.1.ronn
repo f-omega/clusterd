@@ -1,0 +1,5 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd(1) -- clusterd host daemon
+=========================================
+

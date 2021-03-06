@@ -1,0 +1,86 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-exec(7) -- execute a clusterd service
+==============================================
+
+## SYNOPSIS
+
+`clusterd-exec` -vhiI [-w COND] [-n NAMESPACE] [-N RESTARTS] [-l LIMIT]
+    [-f PATH | SERVICEID] ARGS...
+
+## DESCRIPTION
+
+`clusterd-exec` executes a service on a cluster managed by
+clusterd. The service is executed on some node in the cluster, based
+on the resource requirements given in the service description.
+
+For convenience, users can use the `-f` option to have `clusterd-exec`
+create an ephemeral service and launch one instance of it. The service
+will be set up such that it is deleted once all its processes are
+complete.
+
+By default, `clusterd-exec` will schedule the service using the
+requirements in the service description in the clusterd
+controller. However, if launching an ephemeral service with `-f`, or
+if you want to temporarily override these constraints, you can specify
+resource constraints with the `-l` flag.
+
+## OPTIONS
+
+* `-n` <namespace>:
+  The clusterd namespace to launch the service in. If not given, the
+  `default` namespace will be used (namespace id 0).
+* `-N` <restarts>:
+  The number of times to restart this service on failure. If not
+  given, defaults to the one specified in the service description. For
+  ephemeral services, the default is 0. If negative, then the service
+  will be restarted as many times as needed to keep it up.
+* `-l` <resourceclass>[=<min>]:
+  Overrides a resource request for the `resourceclass` resource. The
+  service will be scheduled on a node with at least this much of the
+  resource available. For non-quantifiable resources, the value can be
+  dropped. If given, it'll be ignored. If the requested amount is
+  zero, the request is ignored completely.
+
+  Resource requests specified here are not persisted and only apply to
+  the newly launched process.
+* `-f` <path>:
+  Creates an *ephemeral* service and launches one instance of it. An
+  ephemeral service is a service that does not always have processes
+  running. By default, this service will not have any resource limits.
+
+  If a service with the given path already exists, then no service is
+  created, a new process with the given service is launched as if
+  `clusterd-exec` had been called with `-S` and the service ID of the
+  matching service.
+* `-w` <cond>:
+  Wait for the given condition to be met before returning. Should be
+  one of `none` (for no wait, the default), `started` (to wait until
+  the service process is exec(2)'ed), or `ready` (to wait until the
+  first service health check passes).
+* `-i`:
+  Redirect stdout of the process to the current terminal via ssh(1).
+* `-I`:
+  Redirect stdin *and* stdout of the process to the current terminal via ssh(1).
+* `-v`:
+  Display verbose debugging output
+
+Any positional arguments after the `-f` or `-s` flags are interpreted
+as arguments to be passed to the service process.
+
+## ENVIRONENT
+
+* `CLUSTERD_CONTROLLER`:
+   A comma-separated list of all controllers on this clusterd(7) configuration
+* `CLUSTERD_USER`:
+   The name or uid of the user that should be used to deploy software
+   to remote nodes. This user should have passwordless ssh access to
+   every node in the network. Defaults to `clusterd`.
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-ns(1), clusterd-service(1)

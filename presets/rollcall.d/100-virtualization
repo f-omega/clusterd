@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+if [ ! -z ${CLUSTERD_DISCOVERY+x} ]; then
+    echo "CPU virtualization capabilities"
+    echo "Memory in megabytes"
+elif [ ! -z ${CLUSTERD_HELP+x} ]; then
+    :
+else
+    echo "Checking virtualization capabilities" >&2
+
+    if egrep '(mvx|svm)' /proc/cpuinfo 2>/dev/null; then
+        echo -e 'virt 1'
+    fi
+fi

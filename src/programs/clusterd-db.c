@@ -1,0 +1,431 @@
+/*
+ * Copyright (c) 2021 F Omega Enterprises, LLC
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#define CLUSTERD_COMPONENT "controller"
+#include "clusterd/log.h"
+#include "clusterd/controller.h"
+#include "clusterd/common.h"
+
+#include <lauxlib.h>
+
+extern int CLUSTERD_LOG_LEVEL;
+extern const char rc_controller_schema_sql[];
+extern const char rc_controller_api_lua[];
+
+extern sqlite3 *g_database;
+
+static int db_schema_cb(void *ud, int ncols, char **vals, char **cols) {
+  *(int*)ud = 1;
+  return SQLITE_OK;
+}
+
+sqlite3 *clusterd_open_database(const char *path) {
+  sqlite3 *db;
+  char *errmsg;
+  int err, had_rows = 0;
+
+  err = sqlite3_open(path, &db);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open database: %s: %s", path, sqlite3_errstr(err));
+    return NULL;
+  }
+
+  err = sqlite3_exec(db, "PRAGMA foreign_keys=ON; BEGIN;", db_schema_cb, (void *)&had_rows, &errmsg);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not begin DDL transaction: %s", errmsg);
+    sqlite3_free(errmsg);
+    sqlite3_close(db);
+    return NULL;
+  }
+
+  err = sqlite3_exec(db, rc_controller_schema_sql,
+                     db_schema_cb, (void *)&had_rows,
+                     &errmsg);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not apply latest schema: %s", errmsg);
+    sqlite3_free(errmsg);
+    sqlite3_close(db);
+    return NULL;
+  }
+
+  if ( had_rows ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Schema change returned rows");
+    sqlite3_close(db);
+    return NULL;
+  }
+
+  err = sqlite3_exec(db, "COMMIT;", db_schema_cb, (void *)&had_rows,
+                     &errmsg);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not apply schema change: %s", errmsg);
+    sqlite3_free(errmsg);
+    sqlite3_close(db);
+    return NULL;
+  }
+
+  return db;
+}
+
+static void sqlite3_lua_error(lua_State *lua, char *error, const char *what) {
+  char error_string[1024];
+  int err;
+
+  err = snprintf(error_string, sizeof(error_string), "%s", error);
+  error_string[1023] = '\0';
+
+  sqlite3_free(error);
+
+  luaL_error(lua, "Could not execute sql: %s: %s", what, error);
+}
+
+static void clusterd_begin(lua_State *lua) {
+  int err, had_rows = 0;
+  char *errmsg;
+
+  err = sqlite3_exec(g_database, "BEGIN;", db_schema_cb, (void *)&had_rows, &errmsg);
+  if ( err != SQLITE_OK )
+    sqlite3_lua_error(lua, errmsg, "BEGIN");
+}
+
+static void clusterd_abort(lua_State *lua) {
+  int had_rows = 0;
+
+  sqlite3_exec(g_database, "ROLLBACK;", db_schema_cb, (void *)&had_rows, NULL);
+}
+
+static void clusterd_commit(lua_State *lua) {
+  int err, had_rows = 0;
+  char *errmsg;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Committing transaction");
+  err = sqlite3_exec(g_database, "COMMIT;", db_schema_cb, (void *)&had_rows, &errmsg);
+  if ( err != SQLITE_OK )
+    sqlite3_lua_error(lua, errmsg, "COMMIT");
+}
+
+static int clusterd_run_update(lua_State *lua, sqlite3_stmt *stmt) {
+  int err;
+
+  err = sqlite3_step(stmt);
+  if ( err == SQLITE_ERROR ||
+       err == SQLITE_BUSY ||
+       err == SQLITE_MISUSE )
+    return err;
+  else if ( err == SQLITE_ROW ) {
+    clusterd_abort(lua);
+
+    luaL_error(lua, "SQL update returned a row");
+  } else {
+    return SQLITE_OK;
+  }
+}
+
+static int clusterd_lua_run(lua_State *lua) {
+  const char *sql;
+  int nargs, nparams, err, i, nrow = 0;
+  sqlite3_stmt *stmt = NULL;
+
+  nargs = lua_gettop(lua);
+  if ( nargs == 0 )
+    return luaL_error(lua, "internal.run must be called with at least a SQL statement");
+  else if ( nargs > 2 )
+    return luaL_error(lua, "internal.run expects two arguments, the SQL statement and the parameters");
+
+  sql = lua_tostring(lua, 1);
+  if ( !sql )
+    return luaL_error(lua, "internal.run must be called with a statement and optional parameters");
+
+  err = sqlite3_prepare_v2(g_database, sql, -1, &stmt, NULL);
+  if ( err != SQLITE_OK )
+    goto sqlite_error;
+
+  nparams = sqlite3_bind_parameter_count(stmt);
+  if ( nparams > 0 && nargs == 1 ) {
+    lua_pushstring(lua, "Statement contains parameters, but no parameters given");
+    goto call_error;
+  }
+
+  for ( i = 0; i < nparams; ++i ) {
+    int param = i + 1;
+
+    const char *nm = sqlite3_bind_parameter_name(stmt, param);
+    if ( !nm ) {
+      lua_pushstring(lua, "Statement contains nameless parameters");
+      goto call_error;
+    }
+
+    nm++; // Ignore name sigil
+
+    lua_pushstring(lua, nm);
+    lua_gettable(lua, 2);
+
+    switch ( lua_type(lua, -1) ) {
+    case LUA_TNONE:
+      lua_pushstring(lua, "Internal error");
+      goto call_error;
+
+    case LUA_TNIL:
+      err = sqlite3_bind_null(stmt, param);
+      break;
+
+    case LUA_TNUMBER:
+      err = sqlite3_bind_int64(stmt, param, lua_tonumber(lua, -1));
+      break;
+
+    case LUA_TBOOLEAN:
+      err = sqlite3_bind_int64(stmt, param, lua_toboolean(lua, -1));
+      break;
+
+    case LUA_TSTRING:
+      // Could be blob or string. If the name is prefixed with bin_
+      // then it's a blob
+      if ( strlen(nm) >= 4 &&
+           memcmp(nm, "bin_", 4) == 0 ) {
+        size_t nbytes;
+        const char *luabytes;
+        char *bytes;
+
+        luabytes = lua_tolstring(lua, -1, &nbytes);
+
+        bytes = malloc(nbytes);
+        if ( !bytes ) {
+          sqlite3_finalize(stmt);
+          return luaL_error(lua, "Out of memory");
+        }
+
+        memcpy(bytes, luabytes, nbytes);
+
+        err = sqlite3_bind_blob(stmt, param, bytes, nbytes, free);
+      } else {
+        const char *luastr = lua_tostring(lua, -1);
+        char *str = malloc(strlen(luastr) + 1);
+        if ( !str ) {
+          sqlite3_finalize(stmt);
+          return luaL_error(lua, "Out of memory");
+        }
+
+        strcpy(str, luastr);
+
+        err = sqlite3_bind_text(stmt, param, str, -1, free);
+      }
+
+      break;
+
+    default:
+      lua_pushstring(lua, "Invalid type ");
+      lua_pushstring(lua, lua_typename(lua, lua_type(lua, -1)));
+      lua_pushstring(lua, " for sql parameter ");
+      lua_pushstring(lua, nm);
+      lua_concat(lua, 4);
+      goto call_error;
+    }
+
+    if ( err != SQLITE_OK )
+      goto sqlite_error;
+  }
+
+  lua_newtable(lua); // Results
+
+  nrow = 0;
+  while ( (err = sqlite3_step(stmt)) == SQLITE_ROW ) {
+    int ncol = sqlite3_column_count(stmt);
+
+    lua_newtable(lua); // Row
+    for ( i = 0; i < ncol; ++i ) {
+      lua_pushstring(lua, sqlite3_column_name(stmt, i));
+      switch ( sqlite3_column_type(stmt, i) ) {
+      case SQLITE_INTEGER:
+        lua_pushinteger(lua, sqlite3_column_int64(stmt, i));
+        break;
+
+      case SQLITE_FLOAT:
+        lua_pushnumber(lua, sqlite3_column_double(stmt, i));
+        break;
+
+      case SQLITE_BLOB:
+        lua_pushlstring(lua, sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i));
+        break;
+
+      case SQLITE_NULL:
+        lua_pushnil(lua);
+        break;
+
+      case SQLITE_TEXT:
+        lua_pushlstring(lua, sqlite3_column_text(stmt, i), sqlite3_column_bytes(stmt, i));
+        break;
+
+      default:
+        lua_pushstring(lua, "Bad SQLite data type returned");
+        goto call_error;
+      }
+
+      // Stack is now name, value
+      lua_settable(lua, -3);
+    }
+
+    // Stack is now results, row
+    lua_seti(lua, -2, nrow + 1);
+    nrow++;
+  }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Query complete");
+
+  if ( err != SQLITE_DONE )
+    goto sqlite_error;
+
+  err = sqlite3_finalize(stmt);
+  if ( err != SQLITE_OK ) {
+    return luaL_error(lua, "Could not finalize statement");
+  }
+
+  lua_pushnil(lua); // No error
+
+  return 2;
+
+ sqlite_error:
+  lua_pushstring(lua, sqlite3_errmsg(g_database));
+
+ call_error:
+  if ( stmt )
+    sqlite3_finalize(stmt);
+
+  // Error message is at top of stack
+  lua_pushnil(lua);
+  lua_rotate(lua, -2, 1);
+
+  // Now it's result(nil) and error
+  return 2;
+}
+
+static int clusterd_lua_tx_cont(lua_State *lua, int err, lua_KContext ctx) {
+  if ( err == LUA_OK || err == LUA_YIELD ) {
+    clusterd_commit(lua);
+  } else {
+    if ( err == LUA_ERRRUN ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Transaction error: %s", lua_tostring(lua, -1));
+    } CLUSTERD_LOG(CLUSTERD_DEBUG, "Non-runtime error in api.tx: %d", err);
+
+    clusterd_abort(lua);
+    lua_error(lua); // "Rethrow" the error
+  }
+
+  return 1;
+}
+
+static int clusterd_lua_tx(lua_State *lua) {
+  int err;
+
+  if ( lua_gettop(lua) != 1 || !lua_isfunction(lua, 1) )
+    return luaL_error(lua, "internal.tx must be called with just the transaction body");
+
+  clusterd_begin(lua);
+
+  return clusterd_lua_tx_cont(lua, lua_pcallk(lua, 0, 1, 0, 0, clusterd_lua_tx_cont), 0);
+}
+
+static int clusterd_lua_log(lua_State *lua) {
+  int level;
+  const char *message;
+
+  if ( lua_gettop(lua) != 2 || !lua_isnumber(lua, -2) || !lua_isstring(lua, -1) )
+    return luaL_error(lua, "internal.log must be called with a level and a string");
+
+  level = lua_tonumber(lua, -2);
+  message = lua_tostring(lua, -1);
+
+  CLUSTERD_LOG(level, "%s", message);
+
+  return 0;
+}
+
+static int clusterd_lua_is_valid_ip(lua_State *lua) {
+  int nargs;
+  const char *ip;
+  struct sockaddr_storage ss;
+
+  nargs = lua_gettop(lua);
+  if ( nargs != 1 )
+    return luaL_error(lua, "internal.is_valid_ip expects one argument");
+
+  ip = lua_tostring(lua, 1);
+  if ( !ip )
+    return luaL_error(lua, "internal.is_valid_ip expects a string");
+
+  if ( clusterd_addr_parse(ip, &ss, 0) < 0 )
+    lua_pushnumber(lua, 0);
+  else
+    lua_pushnumber(lua, 1);
+
+  return 1;
+}
+
+#define REGISTER_FUNC(name, func)               \
+  lua_pushcfunction(lua, (func));               \
+  lua_setfield(lua, -2, (name));
+#define REGISTER_INT(name, i)               \
+  lua_pushnumber(lua, (i));                 \
+  lua_setfield(lua, -2, (name));
+int luaopen_clusterd(lua_State *lua) {
+  int err;
+
+  lua_newtable(lua);
+
+  REGISTER_FUNC("log", clusterd_lua_log);
+  REGISTER_INT("debug", CLUSTERD_DEBUG);
+  REGISTER_INT("info", CLUSTERD_INFO);
+  REGISTER_INT("warning", CLUSTERD_WARNING);
+  REGISTER_INT("error", CLUSTERD_ERROR);
+  REGISTER_INT("crit", CLUSTERD_CRIT);
+
+  REGISTER_FUNC("run", clusterd_lua_run);
+  REGISTER_FUNC("tx", clusterd_lua_tx);
+  REGISTER_FUNC("is_valid_ip", clusterd_lua_is_valid_ip);
+
+  lua_setglobal(lua, "internal");
+
+  err = luaL_dostring(lua, rc_controller_api_lua);
+  if ( err != LUA_OK ) {
+    lua_Debug tb;
+    if ( lua_getstack(lua, 0, &tb) == 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Failure opening internal lua module: couldn't get stack");
+    } else {
+      err =  lua_getinfo(lua, "nSl", &tb);
+      if ( err != LUA_OK ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Failure opening internal lua module: could not get debug structure");
+      } else {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Lua error: %s (%s): %s: %d: %s",
+                     tb.name, tb.namewhat, tb.short_src, tb.currentline, tb.what);
+      }
+    }
+
+    if ( lua_isstring(lua, -1) ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Reported error: %s", lua_tostring(lua, -1));
+    }
+    lua_pop(lua, 1);
+    lua_pushnil(lua);
+  }
+
+  lua_pushnil(lua);
+  lua_setglobal(lua, "internal");
+
+  return 1;
+}

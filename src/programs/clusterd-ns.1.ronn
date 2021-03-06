@@ -1,0 +1,69 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-ns(1) -- clusterd namespace manager
+============================================
+
+## SYNOPSIS
+
+`clusterd-ns` -vch (-D | -A) [NAMEORID]...
+
+## DESCRIPTION
+
+`clusterd-ns` creates, removes, or retrieves a clusterd namespace,
+which is a logical grouping of services with similar permissions.
+
+## OPTIONS
+
+* `-D`:
+   Delete the namespaces with the given name or ID
+* `-A`:
+  Create new namespaces. If names are given on the command line, the
+  namespaces are assigned these labels. The new namespace ID is
+  printed to stdout. If no name is given, then one, unnamed namespace
+  is created.
+* `-c`:
+  Require that output be consistent. Without this option `clusterd-ns`
+  will return faster but results may not be completely up-to-date.
+* `-v`:
+  Display verbose debug output.
+
+If given no options, `clusterd-ns` lists all namespaces. If given
+names or IDs as arguments, then `clusterd-ns` retrieves and displays
+information only about those namespaces.
+
+Note that `-v`, `-D` and `-A` must come before any namespace names.
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLER`:
+   A comma-separated list of all controllers on this clusterd(7) configuration
+
+## EXAMPLES
+
+To list all namespaces, just run `clusterd-ns`.
+
+To create a namespace named `apache`:
+
+```
+clusterd-ns -A apache
+```
+
+To delete the namespace:
+
+```
+clusterd-ns -D apache
+```
+
+To display information about the namespace:
+
+```
+clusterd-ns apache
+```
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-controller(1), clusterd-launch(1)
