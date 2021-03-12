@@ -2,6 +2,7 @@
 #define __clusterd_libclusterctl_H__
 
 #include <stdarg.h>
+#include <sys/socket.h>
 
 #define CLUSTERCTL_CLOSED       0
 #define CLUSTERCTL_WAIT_COMMAND 1
@@ -19,20 +20,32 @@
 #define CLUSTERCTL_OOM             5
 #define CLUSTERCTL_UNKNOWN_ERR     6
 #define CLUSTERCTL_PROTO           7
+#define CLUSTERCTL_INVALID_PRAGMA  8
+#define CLUSTERCTL_UNAVAILABLE     9
 
-#define CLUSTERCTL_READ_DONE      0
-#define CLUSTERCTL_READ_LINE      1
-#define CLUSTERCTL_READ_ERROR     2
+#define CLUSTERCTL_READ_DONE       0
+#define CLUSTERCTL_READ_LINE       1
+#define CLUSTERCTL_READ_ERROR      2
+#define CLUSTERCTL_READ_TXFAILED   3
 
 /**
- * Valid values for use_leader argument of clusterctl_open()
+ * Valid values for use_leader argument of clusterctl_begin_*
  */
-#define CLUSTERCTL_INCONSISTENT_OK    0
-#define CLUSTERCTL_REQUIRE_CONSISTENT 1
+typedef enum
+  {
+   CLUSTERCTL_STALE_READS = 0,
+   CLUSTERCTL_CONSISTENT_READS,
+   CLUSTERCTL_MAY_WRITE
+  } clusterctl_tx_level;
+
+#define CLUSTERCTL_MAX_ATTEMPTS    16
 
 typedef struct {
   char line[16 * 1024];
   size_t linelen;
+
+  struct sockaddr_storage attempt_addrs[CLUSTERCTL_MAX_ATTEMPTS];
+  int attempts;
 
   int sk;
   int state;
@@ -50,7 +63,7 @@ typedef struct {
  * clusterctl parameter is initialized. Close it with
  * clusterctl_close().
  */
-int clusterctl_open(clusterctl *c, int use_leader);
+int clusterctl_open(clusterctl *c);
 
 /**
  * Begin an invocation of an unnammed, non-persistent command. The
@@ -60,7 +73,7 @@ int clusterctl_open(clusterctl *c, int use_leader);
  * Use clusterctl_pipe_script() or clusterctl_upload_script() to set
  * the script
  */
-int clusterctl_begin_custom(clusterctl *c);
+int clusterctl_begin_custom(clusterctl *c, clusterctl_tx_level level);
 
 /**
  * Begin an invocation of a named, persistent command. The return
@@ -68,7 +81,7 @@ int clusterctl_begin_custom(clusterctl *c);
  * server or CLUSTERCTL_NEEDS_SCRIPT if a script must be uploaded. On
  * error, a negative number will be returned and errno set
  */
-int clusterctl_begin_named(clusterctl *c, const char *hash);
+int clusterctl_begin_named(clusterctl *c, const char *hash, clusterctl_tx_level level);
 
 /**
  * Upload a script from a file descriptor
@@ -134,12 +147,12 @@ int clusterctl_read_output(clusterctl *c, char *linebuf, size_t *linesz);
  * Returns 0 if the script was invoked, or a negative number
  * otherwise, with errno set.
  */
-int clusterctl_simple(clusterctl *c, const char *lua, ...);
+int clusterctl_simple(clusterctl *c, clusterctl_tx_level lvl, const char *lua, ...);
 
 /**
  * Same as clusterctl_simple() but accepting a va_list
  */
-int clusterctl_simplev(clusterctl *c, const char *lua, va_list args);
+int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl, const char *lua, va_list args);
 
 /**
  * Flushes the output of the given clusterctl to the given file
@@ -160,8 +173,8 @@ int clusterctl_flush_output(clusterctl *c, int out_fd, int err_fd,
  * output (lines and all) in the given buffer. If the output does not
  * fit it is truncated, but output is always null terminated.
  */
-int clusterctl_call_simple(clusterctl *c, const char *lua,
-                           char *output, size_t outputsz,
+int clusterctl_call_simple(clusterctl *c, clusterctl_tx_level lvl,
+                           const char *lua, char *output, size_t outputsz,
                            ...);
 
 /**

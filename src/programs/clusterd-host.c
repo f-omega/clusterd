@@ -34,9 +34,24 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
+#define LOG_CHILD_STATUS(lvl, ec, what)                                  \
+  do {                                                                  \
+    if ( WIFEXITED(ec) ) {                                              \
+      CLUSTERD_LOG(lvl, what " exited with code %d", WEXITSTATUS(ec)); \
+    } else if ( WIFSIGNALED(ec) ) {                                     \
+      CLUSTERD_LOG(lvl, what " killed by signal %d", WTERMSIG(ec)); \
+    } else {                                                        \
+      CLUSTERD_LOG(lvl, what " exited for unknown reason");         \
+    }                                                               \
+  } while ( 0 )
+
 #define MONITOR_COOKIE_LENGTH 64
+
+#define DEFAULT_SIGTERM_GRACE 10000
+#define DEFAULT_SIGQUIT_GRACE  3000
 
 typedef enum
   {
@@ -46,6 +61,16 @@ typedef enum
    /* Tried to send the heartbeat, but it was blocked */
    MONITOR_HEARTBEAT_SEND_PENDING
   } monitor_state;
+
+typedef enum
+  {
+   PROCESS_PREPARING, /* System is preparing to run process */
+   PROCESS_STARTED,   /* Process has started and is running */
+   PROCESS_FAILURE,   /* Process has failed, failure script running */
+   PROCESS_RECOVERED,  /* Failure script has run, but we're in the mandatory cooloff period before restarts */
+   PROCESS_DYING,      /* Process has been signaledto quit and we're in grace period */
+   PROCESS_COMPLETE    /* Process is done */
+  } ps_state;
 
 typedef struct monitor {
   struct sockaddr_storage addr;
@@ -66,17 +91,22 @@ typedef struct monitor {
 
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
+ps_state g_state = PROCESS_PREPARING;
+struct timespec g_next_start;
+struct timespec g_next_kill;
 monitor *g_monitors = NULL;
 char g_ps_path[PATH_MAX] = "";
 
 clusterd_namespace_t  g_nsid = 0;
 clusterd_service_t    g_sid  = 0;
 clusterd_pid_t        g_pid  = 0;
+sig_atomic_t   g_down_signal = -1;
 
 int                g_socket4 = -1;
 int                g_socket6 = -1;
 int             g_max_socket = 0;
 int       g_max_mon_failures = 3;
+int      g_cooloff_period_ms = 1000;
 
 unsigned int g_ping_interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 FILE *g_urandom = NULL;
@@ -373,7 +403,7 @@ static int download_image(const char *image, char *realpath, size_t realpathsz) 
       return -1;
     } else if ( WIFSIGNALED(exitstatus) ) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "dlimage killed by signal %d",
-                     WIFSIGNALED(exitstatus));
+                   WTERMSIG(exitstatus));
       errno = ECOMM;
       return -1;
     } else if ( !(WIFEXITED(exitstatus)) ) {
@@ -524,13 +554,13 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
   pid_t child;
 
  // TODO run prepare script the first time around
-  err = snprintf(servicerun, sizeof(servicerun), "%s/start", svpath);
+  err = snprintf(servicerun, sizeof(servicerun), "%s/run", svpath);
   if ( err >= sizeof(servicerun) ) {
     errno = ENAMETOOLONG;
     return -1;
   }
 
-  err = pipe(stspipe);
+  err = pipe2(stspipe, O_CLOEXEC);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create status pipe: %s", strerror(errno));
     return -1;
@@ -550,15 +580,17 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
       exit(100);
     }
 
-    err = fcntl(stspipe[1], F_GETFD, 0);
+    // SIGTERM, SIGQUIT, SIGINT, etc are handled gracefully
+    // elsewhere. This is mostly a catch-all
+    err = prctl(PR_SET_PDEATHSIG, SIGKILL);
     if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get pipe flags: %s", strerror(errno));
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set parent death signal: %s", strerror(errno));
       exit(100);
     }
 
-    err = fcntl(stspipe[1], F_SETFD, err | FD_CLOEXEC);
+    err = chdir(g_ps_path);
     if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set FD_CLOEXEC: %s", strerror(errno));
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set process working dir: %s", strerror(errno));
       exit(100);
     }
 
@@ -574,6 +606,8 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
 
     close(stspipe[1]);
 
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Child started with pid %u", child);
+
     err = read(stspipe[0], &one, 1);
     if ( err < 0 ) {
       int serrno = errno;
@@ -585,10 +619,180 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
 
     close(stspipe[0]);
 
+    g_state = PROCESS_STARTED;
     *ps = child;
 
     return 0;
   }
+}
+
+static void set_next_start_delay(int ms) {
+  int err;
+
+  err = clock_gettime(CLOCK_MONOTONIC, &g_next_start);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get next start: %s", strerror(errno));
+    return;
+  }
+
+  timespec_add_ms(&g_next_start, ms);
+}
+
+static void process_recovered() {
+  if ( g_state == PROCESS_STARTED )
+    set_next_start_delay(g_cooloff_period_ms);
+
+  g_state = PROCESS_RECOVERED;
+}
+
+static void process_failure(pid_t *ps, int sts, sigset_t *oldmask) {
+  struct stat finish_script_stat;
+  const char *what;
+  int code, err, stspipe[2];
+  char finish_path[PATH_MAX];
+  pid_t child;
+
+  if ( CLUSTERD_LOG_LEVEL >= CLUSTERD_DEBUG ) {
+    if ( WIFEXITED(sts) ) {
+      what = "exited with code";
+      code = WEXITSTATUS(sts);
+    } else if ( WIFSIGNALED(sts) ) {
+      what = "killed by signal";
+      code = WTERMSIG(sts);
+    } else {
+      what = "unknown error";
+      code = sts;
+    }
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process failed: %s %d", what, code);
+  }
+
+  if ( g_state == PROCESS_FAILURE ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Finish script exited abnormally");
+    exit(101); // TODO
+  }
+
+  err = snprintf(finish_path, sizeof(finish_path), "%s/finish", g_ps_path);
+  if ( err >= sizeof(finish_path) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Not enough space for finish command");
+    return;
+  }
+
+  // Make sure the script exists before running it. If it does not,
+  // then go right into PROCESS_RECOVERED
+  err = stat(finish_path, &finish_script_stat);
+  if ( err < 0 ) {
+    if ( errno == ENOENT ) {
+      CLUSTERD_LOG(CLUSTERD_INFO, "No finish script for this process image. Starting in 1s");
+    } else {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not stat %s: %s. Assuming there was no finish script",
+                   finish_path, strerror(errno));
+    }
+
+    process_recovered();
+    return;
+  }
+
+  err = pipe2(stspipe, O_CLOEXEC);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set up status pipe for finish script: %s",
+                 strerror(errno));
+    process_recovered();
+    return;
+  }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting finish script %s", finish_path);
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not start finish script: %s. Assuming recovery", strerror(errno));
+    close(stspipe[0]);
+    close(stspipe[1]);
+    process_recovered();
+    return;
+  } else if ( child == 0 ) {
+    char exitcodestr[20], signalstr[20];
+    close(stspipe[0]);
+
+    memset(exitcodestr, 0, sizeof(exitcodestr));
+    memset(signalstr, 0, sizeof(signalstr));
+
+    if ( WIFEXITED(sts) )
+      sprintf(exitcodestr, "%d", WEXITSTATUS(sts));
+
+    if ( WIFSIGNALED(sts) )
+      sprintf(signalstr, "%d", WTERMSIG(sts));
+
+    /* Restore the signal mask */
+    err = sigprocmask(SIG_SETMASK, oldmask, NULL);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set signal mask: %s", strerror(errno));
+      goto send_errno;
+    }
+
+    err = prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set parent death signal: %s", strerror(errno));
+      goto send_errno;
+    }
+
+    // Set home directory
+    err = chdir(g_ps_path);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set finish script home dir: %s", strerror(errno));
+      goto send_errno;
+    }
+
+    execl(finish_path, "finish", exitcodestr, signalstr, NULL);
+
+  send_errno:
+    err = errno;
+    err = write(stspipe[1], &err, sizeof(err));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not write errno: %s", strerror(errno));
+    } else if ( err != sizeof(err) ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not write all of errno: %s", strerror(errno));
+    }
+    exit(100);
+  } else {
+    int ec;
+    pid_t werr;
+
+    close(stspipe[1]);
+
+    g_state = PROCESS_FAILURE;
+    // Set next_start to be one second from now
+    set_next_start_delay(g_cooloff_period_ms);
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Started finish script with PID %u", child);
+
+    err = read(stspipe[0], &ec, sizeof(ec));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read error: %s", strerror(errno));
+      close(stspipe[0]);
+    } else if ( err == 0 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Finish script started successfully");
+      goto done;
+    } else if ( err == sizeof(ec) ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Finish script had error: %s", strerror(ec));
+      process_recovered();
+    } else {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read errno from finish script");
+      process_recovered();
+    }
+
+    werr = waitpid(child, &ec, 0);
+    if ( werr < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not wait on errored finish child: %s", strerror(errno));
+    }
+
+    LOG_CHILD_STATUS(CLUSTERD_ERROR, ec, "finish script");
+    return;
+  }
+
+ done:
+  *ps = child;
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Waiting for finish script to end");
 }
 
 static void chld_handler(int s) {
@@ -596,10 +800,14 @@ static void chld_handler(int s) {
    * then reap zombies */
 }
 
+static void want_down_handler(int signal) {
+  g_down_signal = signal;
+}
+
 static int setup_signals(sigset_t *mask) {
   int err;
   sigset_t all;
-  struct sigaction action;
+  struct sigaction want_down;
 
   err = sigfillset(&all);
   if ( err < 0 ) {
@@ -615,6 +823,35 @@ static int setup_signals(sigset_t *mask) {
 
   signal(SIGCHLD, chld_handler);
   signal(SIGPIPE, SIG_IGN);
+
+  err = sigfillset(&want_down.sa_mask); // Mask all
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fill handler sigmask: %s", strerror(errno));
+    return -1;
+  }
+
+  want_down.sa_handler = want_down_handler;
+  want_down.sa_flags = 0;
+
+  err = sigaction(SIGTERM, &want_down, NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set SIGTERM: %s", strerror(errno));
+    return -1;
+  }
+
+  err = sigaction(SIGQUIT, &want_down, NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set SIQUIT: %s", strerror(errno));
+    return -1;
+  }
+
+  err = sigaction(SIGINT, &want_down, NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set SIGINT: %s", strerror(errno));
+    return -1;
+  }
+
+  //  signal(SIGHUP, sighup_handler);
 
   return 0;
 }
@@ -650,6 +887,44 @@ static void process_socket(int *sk, int family, fd_set *rfd, fd_set *efd) {
   }
 }
 
+static void kill_process(pid_t ps) {
+  int err;
+
+  err = kill(ps, SIGKILL);
+}
+
+static void relay_signal(pid_t ps) {
+  int err;
+
+  if ( g_state == PROCESS_STARTED ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Relay signal %d", g_down_signal);
+    kill(ps, g_down_signal);
+  } else {
+    g_state = PROCESS_DYING; // Don't kill the finish script
+    return;
+  }
+
+  err = clock_gettime(CLOCK_MONOTONIC, &g_next_kill);
+  if( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not get clock: %s", strerror(errno));
+    kill(ps, SIGKILL);
+    g_state = PROCESS_COMPLETE;
+    return;
+  }
+
+  g_state = PROCESS_DYING;
+  switch ( g_down_signal ) {
+  default:
+  case SIGTERM:
+    timespec_add_ms(&g_next_kill, DEFAULT_SIGTERM_GRACE);
+    break;
+
+  case SIGQUIT:
+    timespec_add_ms(&g_next_kill, DEFAULT_SIGQUIT_GRACE);
+    break;
+  }
+}
+
 int main(int argc, char *const *argv) {
   int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0;
   const char *namespace = "default", *service = NULL;
@@ -661,6 +936,7 @@ int main(int argc, char *const *argv) {
   sigset_t smask;
 
   setlocale(LC_ALL, "C");
+  srandom(time(NULL));
 
   while ( (c = getopt(argc, argv, "-n:m:p:vh")) != -1 ) {
     switch ( c ) {
@@ -732,7 +1008,7 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open /dev/urandom... Monitor requests may be insecure");
   }
 
-  err = clusterctl_open(&ctl, CLUSTERCTL_REQUIRE_CONSISTENT);
+  err = clusterctl_open(&ctl);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open cluster: %s", strerror(errno));
     fclose(g_urandom);
@@ -740,7 +1016,8 @@ int main(int argc, char *const *argv) {
   }
 
   /* Find details about the requested service, like the image path */
-  err = clusterctl_call_simple(&ctl, get_service_path_lua,
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
+                               get_service_path_lua,
                                s_info, sizeof(s_info),
                                "namespace", namespace,
                                "service", service,
@@ -833,7 +1110,6 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  running = 1;
   g_max_socket = g_socket4;
   if ( g_socket6 > g_max_socket )
     g_max_socket = g_socket6;
@@ -841,7 +1117,7 @@ int main(int argc, char *const *argv) {
   if ( g_max_socket < 0 )
     g_max_socket = 0;
 
-  while ( running ) {
+  while ( g_state != PROCESS_COMPLETE ) {
     pid_t werr;
     int sts, nfds, evs;
     monitor *pending_hb;
@@ -869,19 +1145,29 @@ int main(int argc, char *const *argv) {
     werr = waitpid(ps, &sts, WNOHANG);
     if ( werr < 0 ) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child: %s", strerror(errno));
-      running = 0;
+      g_state = PROCESS_COMPLETE;
       break;
     } else if ( werr > 0 ) {
       if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 100 ) {
         CLUSTERD_LOG(CLUSTERD_CRIT, "Internal process error: %u", WEXITSTATUS(sts));
-        running = 0;
+        g_state = PROCESS_COMPLETE;
         continue;
       }
 
       CLUSTERD_LOG(CLUSTERD_ERROR, "Process has exited: %u", sts);
 
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Not yet able to start failure script");
-      exit(50);
+      if ( g_state == PROCESS_STARTED )
+        process_failure(&ps, sts, &smask);
+      else if ( g_state == PROCESS_FAILURE ) {
+        CLUSTERD_LOG(CLUSTERD_INFO, "Finish script complete");
+        g_state = PROCESS_RECOVERED;
+      } else if ( g_state == PROCESS_DYING ) {
+        g_state = PROCESS_COMPLETE;
+        continue;
+      } else {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Received SIGCHLD from unknown state %d", g_state);
+        g_state = PROCESS_COMPLETE;
+      }
     }
 
     // Get next ring. If any monitor is in state send pending, then
@@ -894,6 +1180,19 @@ int main(int argc, char *const *argv) {
              timespec_cmp(&pending_hb->next_hb, &timeout) < 0 )
           memcpy(&timeout, &pending_hb->next_hb, sizeof(timeout));
       }
+    }
+
+    // If we're in the failure or recovering states then add g_next_start to the timer
+    if ( g_state == PROCESS_RECOVERED &&
+         ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
+          timespec_cmp(&g_next_start, &timeout) < 0) ) {
+      memcpy(&timeout, &g_next_start, sizeof(timeout));
+    }
+
+    if ( g_state == PROCESS_DYING &&
+         ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
+          timespec_cmp(&g_next_kill, &timeout) < 0) ) {
+      memcpy(&timeout, &g_next_kill, sizeof(timeout));
     }
 
     // Get timeout from next_hb time
@@ -916,7 +1215,15 @@ int main(int argc, char *const *argv) {
                   &smask);
   process:
     if ( evs < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not select: %s", strerror(errno));
+      if ( errno != EINTR )
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not select: %s", strerror(errno));
+
+      if ( g_down_signal >= 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Received signal %d", g_down_signal);
+        relay_signal(ps);
+
+        g_down_signal = -1;
+      }
     } else {
       struct timespec now;
 
@@ -946,8 +1253,34 @@ int main(int argc, char *const *argv) {
 
       if ( g_socket6 >= 0 )
         process_socket(&g_socket6, AF_INET6, &rfds, &efds);
+
+      // If the state is PROCESS_RECOVERED and g_next_start has passed, start the service again
+      if ( g_state == PROCESS_RECOVERED &&
+           timespec_cmp(&now, &g_next_start) >= 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Cooloff period passed. Restarting service");
+
+        err = exec_service(&ps, &smask, realpath, svargc, svargv);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restart service: %s", strerror(errno));
+          g_state = PROCESS_COMPLETE;
+        }
+
+        g_state = PROCESS_STARTED;
+      }
+
+      if ( g_state == PROCESS_DYING &&
+           timespec_cmp(&now, &g_next_kill) >= 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Process did not die on time. Killing");
+        kill_process(ps);
+        g_state = PROCESS_COMPLETE;
+      }
     }
   }
+
+  // TODO need to clean up the process directory and make sure the
+  // child is dead.
+
+  // Process directory can be cleaned up now
 
   return 0;
 }

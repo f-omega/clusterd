@@ -65,7 +65,9 @@ download_ssh() {
 
 download_local() {
     if [ -d "$IMAGE" ]; then
-        ln -s "$IMAGE" "$OUTPUT"
+        if [ ! -e "$OUTPUT" ]; then
+            ln -s "$IMAGE" "$OUTPUT"
+        fi
     else
         log "$IMAGE does not exist"
         exit 1

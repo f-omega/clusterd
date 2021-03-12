@@ -23,6 +23,7 @@
 
 #define CLUSTERD_COMPONENT "libclusterctl"
 #include "clusterd/log.h"
+#include "clusterd/common.h"
 #include "libclusterctl.h"
 #include "sha256.h"
 
@@ -41,7 +42,7 @@
 
 extern int CLUSTERD_LOG_LEVEL;
 
-static int random_controller_ix(const char *controller) {
+static int random_controller_ix(const char *controller, int *countout) {
   int count = 0, i, ctllen = strlen(controller);
 
   for ( i = 0; i < ctllen; ++i ) {
@@ -52,6 +53,8 @@ static int random_controller_ix(const char *controller) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "CLUSTERD_CONTROLLER environment variable must contain at least one controller");
   } else
     count++;
+
+  if ( countout ) *countout = count;
 
   return random() % count;
 }
@@ -140,15 +143,31 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
   return 0;
 }
 
-int clusterctl_open(clusterctl *c, int use_leader) {
-  const char *controller;
+static int clusterctl_connect(clusterctl *c, struct sockaddr_storage *ctladdr, socklen_t ctladdrlen) {
+  int sk, err;
+
+  sk = socket(ctladdr->ss_family, SOCK_STREAM, IPPROTO_TCP);
+  if ( sk < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open socket: %s", strerror(errno));
+    return -1;
+  }
+
+  err = connect(sk, (struct sockaddr *) ctladdr, ctladdrlen);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not connect to controller: %s", strerror(errno));
+    return -1;
+  }
+
+  c->sk = sk;
+
+  return 0;
+}
+
+static int clusterctl_connect_random(clusterctl *c) {
   struct sockaddr_storage ctladdr;
   socklen_t ctladdrlen;
-  int err, ctlix, sk;
-
-  if ( use_leader ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Using leader not implemented yet");
-  }
+  const char *controller;
+  int err, ctlix, firstctlix, i, count;
 
   controller = getenv("CLUSTERD_CONTROLLER");
   if ( !controller ) {
@@ -158,12 +177,13 @@ int clusterctl_open(clusterctl *c, int use_leader) {
     return -1;
   }
 
-  ctlix = random_controller_ix(controller);
+  firstctlix = ctlix = random_controller_ix(controller, &count);
   if ( ctlix < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not choose controller");
     return -1;
   }
 
+ next_controller:
   // We want to choose a random controller
   err = resolve_controller(&ctladdr, &ctladdrlen, controller, ctlix);
   if ( err < 0 ) {
@@ -171,19 +191,35 @@ int clusterctl_open(clusterctl *c, int use_leader) {
     return -1;
   }
 
-  sk = socket(ctladdr.ss_family, SOCK_STREAM, IPPROTO_TCP);
-  if ( sk < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open socket: %s", strerror(errno));
-    return -1;
+  for ( i = 0; i < c->attempts; ++i ) {
+    if ( clusterd_addrcmp(c->attempt_addrs + i, &ctladdr) == 0 ) {
+      ctlix = (ctlix + 1) % count;
+      if ( ctlix == firstctlix ) {
+        errno = ENAVAIL;
+        return -1;
+      } else
+        goto next_controller;
+    }
   }
 
-  err = connect(sk, (struct sockaddr *) &ctladdr, ctladdrlen);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not connect to controller: %s", strerror(errno));
-    return -1;
+  memcpy(c->attempt_addrs + c->attempts, &ctladdr, ctladdrlen);
+  c->attempts++;
+
+  return clusterctl_connect(c, &ctladdr, ctladdrlen);
+}
+
+int clusterctl_open(clusterctl *c) {
+  int err;
+
+  c->attempts = 0;
+
+  while ( c->attempts < CLUSTERCTL_MAX_ATTEMPTS ) {
+    err = clusterctl_connect_random(c);
+    if ( err == 0 ) break;
   }
 
-  c->sk = sk;
+  if ( err < 0 ) return err;
+
   c->state = CLUSTERCTL_WAIT_COMMAND;
   c->error = 0;
   c->linelen = 0;
@@ -255,6 +291,8 @@ static void clusterctl_set_error(clusterctl *c, const char *linebuf, size_t line
   } errors[] =
       { { "!abort\n", CLUSTERCTL_PROTO },
         { "!invalid-command", CLUSTERCTL_INVALID_COMMAND },
+        { "!invalid-pragma", CLUSTERCTL_INVALID_PRAGMA },
+        { "!unavailable", CLUSTERCTL_UNAVAILABLE },
         { "!hash-mismatch", CLUSTERCTL_HASH_MISMATCH },
         { "!bad-syntax", CLUSTERCTL_BAD_SYNTAX },
         { "!out-of-memory", CLUSTERCTL_OOM },
@@ -273,12 +311,131 @@ static void clusterctl_set_error(clusterctl *c, const char *linebuf, size_t line
   c->state = CLUSTERCTL_UNKNOWN_ERR;
 }
 
-static int clusterctl_begin_command(clusterctl *c, const char *cmdstring) {
+static int clusterctl_reconnect(clusterctl *c, const char *addr) {
+  int err, old_sk;
+  struct sockaddr_storage ss;
+  socklen_t sslen;
+
+  err = clusterd_addr_parse((char *)addr, &ss, 1);
+  if ( err < 0 )
+    return err;
+
+  old_sk = c->sk;
+
+  switch ( ss.ss_family ) {
+  case AF_INET:
+    sslen = sizeof(struct sockaddr_in);
+    break;
+
+  case AF_INET6:
+    sslen = sizeof(struct sockaddr_in6);
+    break;
+
+  default:
+    errno = EINVAL;
+    return -1;
+  }
+
+  err = clusterctl_connect(c, &ss, sslen);
+  if ( err < 0 ) return err;
+
+  close(old_sk);
+
+  return 0;
+}
+
+static int clusterctl_upgrade_level(clusterctl *c, const char *pragma) {
+  static const size_t leader_len = strlen("!leader ");
+  int err, redirects = 0;
+  size_t pragmalen = strlen(pragma);
+
+  char linebuf[1024];
+  size_t linesz;
+
+ again:
+  if ( redirects > 3 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Request redirected more than %d times", redirects - 1);
+    errno = ENAVAIL;
+    return -1;
+  } else if ( redirects > 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Trying upgrade again with leader");
+  }
+
+  // Send the pragma
+  err = send(c->sk, pragma, pragmalen, 0);
+  if ( err < 0 ) {
+    return err;
+  } else if ( err != pragmalen ) {
+    clusterctl_close(c);
+
+    errno = ESHUTDOWN;
+    return -1;
+  }
+
+  // Now read back. It should either be +ok or !leader...
+  err = readpline(c, linebuf, sizeof(linebuf), &linesz);
+  if ( err < 0 ) return err;
+
+  if ( strncmp(linebuf, "+ok\n", linesz) == 0 ) {
+    return 0;
+  } else if ( linesz >= leader_len &&
+              memcmp(linebuf, "!leader ", leader_len) == 0 ) {
+    char addr[CLUSTERD_ADDRSTRLEN + 1];
+    int nodeid;
+    err = sscanf(linebuf, "!leader %" MKSTR(CLUSTERD_ADDRSTRLEN) "s %d", addr, &nodeid);
+    if ( err != 2 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid leader line: %.*s", (int)linesz, linebuf);
+      clusterctl_close(c);
+      errno = EPROTO;
+      return -1;
+    }
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Re-establishing clusterctl to leader: %s (nodeid=%d)", addr, nodeid);
+
+    err = clusterctl_reconnect(c, addr);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not connect to leader");
+      errno = ENAVAIL;
+      return -1;
+    }
+
+    redirects++;
+    goto again;
+  } else {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Unknown response to pragma: %.*s", (int)linesz, linebuf);
+    clusterctl_close(c);
+
+    errno = EPROTO;
+    return -1;
+  }
+}
+
+static int clusterctl_begin_command(clusterctl *c, const char *cmdstring, clusterctl_tx_level lvl) {
   char linebuf[1024];
   int err;
   size_t linesz;
 
   if ( c->state != CLUSTERCTL_WAIT_COMMAND ) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  switch ( lvl ) {
+  case CLUSTERCTL_STALE_READS:
+    break;
+
+  case CLUSTERCTL_CONSISTENT_READS:
+    err = clusterctl_upgrade_level(c, "+consistent\n");
+    if ( err < 0 ) return -1;
+    break;
+
+  case CLUSTERCTL_MAY_WRITE:
+    err = clusterctl_upgrade_level(c, "+write\n");
+    if ( err < 0 ) return -1;
+    break;
+
+  default:
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid clusterctl command level: %d", lvl);
     errno = EINVAL;
     return -1;
   }
@@ -328,12 +485,12 @@ static int clusterctl_begin_command(clusterctl *c, const char *cmdstring) {
   return 0;
 }
 
-int clusterctl_begin_named(clusterctl *c, const char *hash) {
-  return clusterctl_begin_command(c, hash);
+int clusterctl_begin_named(clusterctl *c, const char *hash, clusterctl_tx_level lvl) {
+  return clusterctl_begin_command(c, hash, lvl);
 }
 
-int clusterctl_begin_custom(clusterctl *c) {
-  return clusterctl_begin_command(c, "");
+int clusterctl_begin_custom(clusterctl *c, clusterctl_tx_level lvl) {
+  return clusterctl_begin_command(c, "", lvl);
 }
 
 int clusterctl_pipe_script(clusterctl *c, int fd) {
@@ -550,24 +707,29 @@ int clusterctl_read_output(clusterctl *c, char *linebuf, size_t *linesz) {
       c->state = CLUSTERCTL_ERROR;
       return clusterctl_read_output(c, linebuf, linesz);
     }
+  } else if ( strncmp(linebuf, "!leadership-lost\n", *linesz) == 0 ) {
+    // The transaction failed and must be retried
+    c->state = CLUSTERCTL_WAIT_COMMAND;
+    return CLUSTERCTL_READ_TXFAILED;
   } else if ( c->state == CLUSTERCTL_PROCESSING ) // User line
     return CLUSTERCTL_READ_LINE;
   else
     return CLUSTERCTL_READ_ERROR;
 }
 
-int clusterctl_simple(clusterctl *c, const char *script, ...) {
+int clusterctl_simple(clusterctl *c, clusterctl_tx_level lvl, const char *script, ...) {
   va_list args;
   int err;
 
   va_start(args, script);
-  err = clusterctl_simplev(c, script, args);
+  err = clusterctl_simplev(c, lvl, script, args);
   va_end(args);
 
   return err;
 }
 
-int clusterctl_simplev(clusterctl *c, const char *script, va_list args) {
+int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
+                       const char *script, va_list args) {
   char sha256str[SHA256_STR_LENGTH + 1];
   unsigned char sha256[SHA256_OCTET_LENGTH];
   size_t scriptlen, paramlen;
@@ -586,7 +748,7 @@ int clusterctl_simplev(clusterctl *c, const char *script, va_list args) {
   calc_sha_256(sha256, script, scriptlen);
   sha_256_digest(sha256str, sha256);
 
-  err = clusterctl_begin_named(c, sha256str);
+  err = clusterctl_begin_named(c, sha256str, lvl);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not invoke named script %s: %s", sha256str, strerror(errno));
     return err;
@@ -600,8 +762,12 @@ int clusterctl_simplev(clusterctl *c, const char *script, va_list args) {
 
   // Add parameters
   while ( (param_name = va_arg(args, const char *)) ) {
-    paramlen = snprintf(param_line, sizeof(param_line), "%s=%s\n", param_name,
-                        va_arg(args, const char *));
+    const char *param_value;
+
+    param_value = va_arg(args, const char *);
+    if ( !param_value ) continue;
+
+    paramlen = snprintf(param_line, sizeof(param_line), "%s=%s\n", param_name, param_value);
     if ( paramlen >= sizeof(param_line) ) {
       clusterctl_close(c);
 
@@ -647,6 +813,9 @@ int clusterctl_flush_output(clusterctl *c, int out_fd, int err_fd, int *was_succ
     } else if ( err == CLUSTERCTL_READ_ERROR ) {
       if ( was_success ) *was_success = 0;
       line_fd = err_fd;
+    } else if ( err == CLUSTERCTL_READ_TXFAILED ) {
+      errno = ENAVAIL;
+      return -1;
     } else {
       CLUSTERD_LOG(CLUSTERD_CRIT, "clusterd_read_output() returned an invalid value");
 
@@ -679,18 +848,26 @@ int clusterctl_flush_output(clusterctl *c, int out_fd, int err_fd, int *was_succ
   return 0;
 }
 
-int clusterctl_call_simple(clusterctl *c, const char *lua,
-                           char *output, size_t outputsz,
+int clusterctl_call_simple(clusterctl *c, clusterctl_tx_level lvl,
+                           const char *lua, char *output, size_t outputsz,
                            ...) {
   char linebuf[64 * 1024];
   size_t linesz;
   va_list args;
-  int err;
+  int err, attempts = 0;
+
+ tryagain:
+  if ( attempts > 3 ) {
+    errno = ENAVAIL;
+    return -1;
+  } else if ( attempts > 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Attempting script again (try %d)", attempts);
+  }
 
   if ( outputsz > 0 ) output[0] = '\0';
 
   va_start(args, outputsz);
-  err = clusterctl_simplev(c, lua, args);
+  err = clusterctl_simplev(c, lvl, lua, args);
   va_end(args);
 
   // Now attempt to read the output
@@ -713,6 +890,14 @@ int clusterctl_call_simple(clusterctl *c, const char *lua,
   switch ( err ) {
   case CLUSTERCTL_READ_DONE:
     return 0;
+
+  case CLUSTERCTL_READ_TXFAILED:
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Script failed because the controller we were talking to lost leadership: %s",
+                 lua);
+
+    // Retry
+    attempts ++;
+    goto tryagain;
 
   case CLUSTERCTL_READ_ERROR:
     if ( outputsz > 0 ) output[0] = '\0';

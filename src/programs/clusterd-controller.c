@@ -18,6 +18,12 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
+ *
+ * TODO:
+ *
+ * - Currently all requests are processed sequentially.This is okay, and
+ *   simplifies things. However, while write requests are outstanding waiting
+ *   for quorum, it should be possible to process read-only requests.
  */
 
 #define CLUSTERD_COMPONENT "controller"
@@ -31,6 +37,7 @@
 #include <string.h>
 
 #include <getopt.h>
+#include <assert.h>
 #include <uv.h>
 #include <lua.h>
 #include <lualib.h>
@@ -41,6 +48,8 @@
 
 #define CLUSTERD_DEFAULT_CONTROLLER_PORT 38019
 
+extern struct raft *lua_tx_raft;
+
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
 typedef enum
@@ -48,16 +57,25 @@ typedef enum
    CLIENT_GET_COMMAND,
    CLIENT_ACCEPT_SCRIPT,
    CLIENT_ACCEPT_PARAMETERS,
+   CLIENT_ENQUEUED,
    CLIENT_BUSY,
+   CLIENT_WAITING_FOR_QUORUM,
    CLIENT_RESPONDING,
    CLIENT_DONE
   } client_state;
 
-typedef struct {
-  uv_tcp_t tcp;
-} controller_service;
+struct controller_client;
 
 typedef struct {
+  uv_tcp_t tcp;
+  struct raft *raft;
+
+  unsigned int log_entries_pending : 1;
+
+  struct controller_client *processing_head, *processing_tail;
+} controller_service;
+
+typedef struct controller_client {
   uv_tcp_t tcp;
 
   char  command_buf[32 * 1024];
@@ -70,9 +88,16 @@ typedef struct {
   unsigned int writing : 1;
   client_state state;
 
+  // This flag is set if the client wants to run a ctlcall that needs
+  // write access. This flag is only set on nodes who are the leader
+  // (or think they are). Otherwise, it fails.
+  unsigned int needs_tx_write : 1;
+
   lua_State *thread;
 
   uv_write_t response;
+
+  struct controller_client *prev, *next;
 } controller_client;
 
 struct lua_library {
@@ -102,7 +127,19 @@ extern const char rc_json_lua[];
 static void client_accept_command(controller_client *client);
 static void client_abort(controller_client *client);
 static void client_respond(controller_client *client, const char *fmt, ...);
-static void client_invoke(controller_client *client, int readonly);
+static void client_enqueue(controller_client *client);
+static void client_wait_for_write(controller_client *client);
+static void client_leader_redirect(controller_client *client, int provisional_ok);
+
+static void service_dequeue_and_process();
+static void lua_full_gc();
+
+int clusterd_tx_commit();
+void clusterd_tx_free();
+int clusterd_apply_tx(char *sql, size_t sqlsz, char **errmsg);
+int clusterd_commit(char **errmsg);
+int clusterd_begin(char **errmsg, int writable);
+int clusterd_rollback();
 
 static int is_valid_sha256(const char *s) {
   int i;
@@ -175,8 +212,37 @@ static int add_peer(char *addrstr, struct raft_configuration *conf) {
 static int clusterd_apply(struct raft_fsm *fsm,
                           const struct raft_buffer *buf,
                           void **result) {
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Debug. Applying %.*s", (int)buf->len, (char *)buf->base);
-  return -1;
+  char *nl, *end, *errmsg;
+  int version, err;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "[RAFT] Applying %.*s", (int)buf->len, (char *)buf->base);
+
+  nl = memchr(buf->base, '\n', buf->len);
+  // Find the version string. It should be --%u
+  if ( !nl ||
+       buf->len <= 2 ||
+       memcmp(buf->base, "--", 2) != 0 )
+    return RAFT_MALFORMED;
+
+  errno = 0;
+  version = strtol(buf->base + 2, &end, 10);
+  if ( errno != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not parse Raft log entry version: %s", strerror(errno));
+    return RAFT_MALFORMED;
+  }
+
+  if ( version != 1 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid version: %d", version);
+    return RAFT_MALFORMED;
+  }
+
+  err = clusterd_apply_tx(buf->base, buf->len, &errmsg);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not apply transaction: %s", errmsg);
+    return RAFT_MALFORMED;
+  }
+
+  return 0;
 }
 
 static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], unsigned *n_bufs) {
@@ -208,19 +274,65 @@ static void client_alloc_buffer(uv_handle_t *handle, size_t suggested, uv_buf_t 
 
 static void free_client(uv_handle_t *tcp) {
   controller_client *client = CLUSTERD_STRUCT_FROM_FIELD(controller_client, tcp, tcp);
+
+  // Remove the client from the lua client table
+  lua_getglobal(g_lua, "clients");
+  lua_pushnil(g_lua);
+  lua_seti(g_lua, -2, (lua_Integer)client);
+
   free(client);
+
+  lua_full_gc();
 }
 
 static void client_close(controller_client *client) {
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Closing client %p", (void *)client);
   if ( client->writing ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Deferring close %p", (void *)client);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Deferring close on %p due to write", (void *)client);
+    // Reading is already stopped
     client->state = CLIENT_DONE;
-  } else
+  } else if ( client->state == CLIENT_ENQUEUED ) {
+    // Client is enqueued for processing, but hasn't been processed
+    // yet (if it did, it'd be CLIENT_BUSY or CLIENT_RESPONDING).
+
+    if ( client == g_service->processing_head ) {
+      g_service->processing_head = g_service->processing_tail = NULL;
+      client->next = client->prev = NULL;
+      goto do_close;
+    } else {
+      // Client is enqueued to write but hasn't done so yet, remove from queue and continue
+      if ( client == g_service->processing_tail )
+        g_service->processing_tail = client->prev;
+
+      if ( client->prev )
+        client->prev->next = client->next;
+
+      if ( client->next )
+        client->next->prev = client->prev;
+
+      goto do_close;
+    }
+  } else if ( client->state == CLIENT_WAITING_FOR_QUORUM ) {
+    // An abort while waiting for quorum. The request was submitted,
+    // so we need this client around to wait.
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Deferring close on %p due to quorum", (void *)client);
+    client->state = CLIENT_DONE;
+  }
+
+do_close:
     uv_close((uv_handle_t *)&client->tcp, free_client);
 }
 
 static void do_nothing_close(uv_handle_t *hdl) {
+}
+
+static void lua_full_gc() {
+  int err;
+
+  err = lua_gc(g_lua, LUA_GCCOLLECT, 0);
+  if ( err != LUA_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Lua garbage collection failure");
+  }
 }
 
 static void client_resume(controller_client *client) {
@@ -230,25 +342,88 @@ static void client_resume(controller_client *client) {
 
   err = lua_resume(client->thread, g_lua, 0);
   if ( err == LUA_OK ) {
-    client->state = CLIENT_GET_COMMAND;
-    client_respond(client, "--DONE\n");
+    int complete = 0;
 
-    // Now perform a full LUA GC
-    err = lua_gc(g_lua, LUA_GCCOLLECT, 0);
-    if ( err != LUA_OK ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Lua garbage collection failure");
+    client->state = CLIENT_GET_COMMAND;
+
+    // If the client was writing, then submit the raft transaction
+    if ( client->needs_tx_write ) {
+      if ( client != g_service->processing_head ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "This client is not at the write head but it was run anyway");
+        abort();
+      }
+
+      client->needs_tx_write = 0;
+      err = clusterd_tx_commit();
+      if ( err < 0 ) {
+        switch ( errno ) {
+        case EAGAIN:
+          client->state = CLIENT_WAITING_FOR_QUORUM;
+          err = clusterd_rollback();
+          if ( err < 0 ) {
+            CLUSTERD_LOG(CLUSTERD_CRIT, "Could not rollback transaction while waiting for quorum");
+            abort();
+          }
+          break;
+
+        case EREMOTE:
+          // Not leader
+          client_leader_redirect(client, 0);
+          break;
+
+        default:
+          // Report error
+          clusterd_tx_free();
+          client_respond(client, "!ERROR\nCould not commit transaction\n--DONE\n");
+          break;
+        }
+      } else {
+        char *msg;
+
+        // If the raft transaction applied immediately, commit
+        err = clusterd_commit(&msg);
+        if ( err < 0 ) {
+          client_respond(client, "!ERROR\n%s\n--DONE\n", msg);
+          return;
+        }
+      }
+    } else {
+      err = clusterd_rollback();
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not rollback read-only transaction");
+        abort();
+      }
+    }
+
+    if ( client->state == CLIENT_GET_COMMAND ) {
+      client_respond(client, "--DONE\n");
+      service_dequeue_and_process();
     }
   } else if ( err == LUA_YIELD ) {
-    const char *message = lua_tostring(client->thread, -1);
-    lua_pop(client->thread, 1);
+    const char *message;
 
-    client->state = CLIENT_RESPONDING;
-    client_respond(client, "%s\n", message);
+    message = lua_tostring(client->thread, -1);
+
+    if ( message ) {
+      lua_pop(client->thread, 1);
+
+      client->state = CLIENT_RESPONDING;
+      client_respond(client, "%s\n", message);
+    } else {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Unknown value yielded from Lua");
+      client->state = CLIENT_GET_COMMAND;
+      client->needs_tx_write = 0;
+      clusterd_tx_free();
+      client_respond(client, "!ERROR\nUnknown lua value\n--DONE\n");
+      service_dequeue_and_process();
+    }
   } else {
     lua_Debug tb;
     char lua_error[16 * 1024];
 
     client->state = CLIENT_GET_COMMAND;
+    client->needs_tx_write = 0;
+    clusterd_tx_free();
     if ( lua_isstring(client->thread, -1) ) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Lua error: %s", lua_tostring(client->thread, -1));
       snprintf(lua_error, sizeof(lua_error), "%s", lua_tostring(client->thread, -1));
@@ -274,19 +449,155 @@ static void client_resume(controller_client *client) {
     lua_error[sizeof(lua_error) - 1] = '\0';
 
     client_respond(client, "!ERROR\n%s\n--DONE\n", lua_error);
-
+    err = clusterd_rollback();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not rollback transaction that had error");
+      abort();
+    }
+    service_dequeue_and_process();
   }
 }
 
-static void client_invoke(controller_client *client, int readonly) {
-  // Normally, unless this is a write, we could fork and complete the
-  // service request.
+static void service_process_next() {
+  controller_client *client;
+  int err;
+  char *errmsg;
 
-  // If this is a write, we must ask for a redirect to the leader
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Processing next work item");
 
+  while ( g_service->processing_head ) {
+    client = g_service->processing_head;
+
+    err = clusterd_begin(&errmsg, client->needs_tx_write);
+    if ( err < 0 ) {
+      client->state = CLIENT_GET_COMMAND;
+      client->needs_tx_write = 0;
+      client_respond(client, "!ERROR\ndb error: %s\n--DONE\n", errmsg);
+
+      g_service->processing_head = g_service->processing_head->next;
+      continue;
+    } else {
+      // After this, the client will be resumed and the thread started
+      client->state = CLIENT_RESPONDING;
+      client_respond(client, "+processing\n");
+      return;
+    }
+  }
+
+  g_service->processing_tail = NULL;
+}
+
+static void service_dequeue_and_process() {
+  if ( g_service->processing_head ) {
+    g_service->processing_head = g_service->processing_head->next;
+    if ( !g_service->processing_head )
+      g_service->processing_tail = NULL;
+  }
+
+  service_process_next();
+}
+
+void clusterd_next_write(int status, void *result) {
+  controller_client *client;
+
+  if ( !g_service->processing_head ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "No client was submitting a raft apply, but we're here");
+    abort();
+  }
+
+  client = g_service->processing_head;
+
+  if ( client->state == CLIENT_DONE ) {
+    // Client exited while we were submitting this request. Well, it's either committed now or it's not.
+    if ( status == 0 )
+      CLUSTERD_LOG(CLUSTERD_INFO, "Client %p disconnected while waiting for quorum. The request was committed",
+                   (void *)client);
+    else
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Client %p disconnected while waiting for quorum. Request was not applied: %s",
+                   (void *)client, raft_errmsg(g_service->raft));
+  } else {
+    client->state = CLIENT_GET_COMMAND;
+    client->needs_tx_write = 0;
+
+    if ( status == 0 ) {
+      // Resume the client normally
+      client_respond(client, "--DONE\n");
+    } else if ( status == RAFT_LEADERSHIPLOST ) {
+      // Special leadership-lost error
+      client_respond(client, "!leadership-lost\n");
+    } else {
+      client_respond(client, "!ERROR\n%s\n--DONE\n", raft_errmsg(g_service->raft));
+    }
+
+    service_dequeue_and_process();
+  }
+}
+
+static void client_enqueue(controller_client *client) {
   lua_setglobal(client->thread, "params");
-  client->state = CLIENT_RESPONDING;
-  client_respond(client, "+processing\n");
+
+  client->state = CLIENT_ENQUEUED;
+
+  // Add the client to the processing_head
+  if ( g_service->processing_head ) {
+    g_service->processing_tail->next = client;
+    client->prev = g_service->processing_tail;
+
+    g_service->processing_tail = client;
+    client->next = NULL;
+  } else {
+    g_service->processing_head = g_service->processing_tail = client;
+    client->next = client->prev = NULL;
+
+    service_process_next();
+  }
+}
+
+static void client_leader_redirect(controller_client *client, int provisional_ok) {
+  // If we're here, we are not the leader. There either can be a
+  // leader, or we could be in the middle of an election, or the
+  // leader could be unavailable.
+  raft_id leader_id;
+  const char *address;
+
+  raft_leader(g_service->raft, &leader_id, &address);
+
+  if ( address ) {
+    struct sockaddr_storage ss;
+    int err;
+
+    err = clusterd_addr_parse(address, &ss, 1);
+    if ( err < 0 ) {
+      client_respond(client, "!unavailable\n");
+    } else {
+      char adjaddr[CLUSTERD_ADDRSTRLEN];
+
+      switch ( ss.ss_family ) {
+      case AF_INET:
+        ((struct sockaddr_in *)&ss)->sin_port =
+          htons(ntohs(((struct sockaddr_in *)&ss)->sin_port) + 1);
+        break;
+
+      case AF_INET6:
+        ((struct sockaddr_in6 *)&ss)->sin6_port =
+          htons(ntohs(((struct sockaddr_in6 *)&ss)->sin6_port) + 1);
+        break;
+
+      default:
+        ss.ss_family = AF_UNSPEC;
+        client_respond(client, "!unavailable\n");
+        break;
+      }
+
+      if ( ss.ss_family != AF_UNSPEC ) {
+        clusterd_addr_render(adjaddr, &ss, 1);
+        client_respond(client, "!leader %s %u\n", adjaddr, leader_id);
+      }
+    }
+  } else {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Got state: %d", raft_state(g_service->raft));
+    client_respond(client, "!unavailable\n");
+  }
 }
 
 static int client_read_command(controller_client *client) {
@@ -308,7 +619,30 @@ static int client_read_command(controller_client *client) {
     *eol = '\0';
     if ( strlen(client->command_buf) > 0 &&
          is_valid_sha256(client->command_buf) == 0 ) {
-      client_respond(client, "!invalid-command");
+      if ( client->command_buf[0] == '+' ) {
+        // Handle special command (like +consistent or +write)
+        if ( strcmp(client->command_buf, "+consistent") == 0 ) {
+          // Check if we're the leader. If we're not, then return a +leader redirect
+          if ( raft_state(g_service->raft) != RAFT_LEADER ) {
+            client_leader_redirect(client, 0);
+          } else {
+            client_respond(client, "+ok\n");
+          }
+        } else if ( strcmp(client->command_buf, "+write") == 0 ) {
+          // Check if we're the leader. If we're not, then return a
+          // +leader redirect. Otherwise, place us into the write
+          // queue, and mark the client as wanting a write.
+          if ( raft_state(g_service->raft) != RAFT_LEADER ) {
+            client_leader_redirect(client, 1);
+          } else {
+            client->needs_tx_write = 1;
+            client_respond(client, "+ok\n");
+          }
+        } else
+          client_respond(client, "!invalid-pragma\n");
+      } else {
+        client_respond(client, "!invalid-command\n");
+      }
     } else if ( strlen(client->command_buf) == 0 ) {
       memset(client->script_hash, 0, sizeof(client->script_hash));
       client_respond(client, "+need-script\n");
@@ -358,6 +692,7 @@ static int client_read_command(controller_client *client) {
 
         if ( needs_hash && memcmp(hash_str, client->script_hash, SHA256_STR_LENGTH) != 0 ) {
           client->state = CLIENT_GET_COMMAND;
+          client->needs_tx_write = 0;
           client_respond(client, "!hash-mismatch\n");
         } else {
           client->command_buf[client->command_offs - 1] = '\0';
@@ -372,17 +707,20 @@ static int client_read_command(controller_client *client) {
 
           case LUA_ERRSYNTAX:
             client->state = CLIENT_GET_COMMAND;
+            client->needs_tx_write = 0;
             client_respond(client, "!bad-syntax\n");
             return 0;
 
           case LUA_ERRMEM:
             client->state = CLIENT_GET_COMMAND;
+            client->needs_tx_write = 0;
             client_respond(client, "!out-of-memory\n");
             return 0;
 
           default:
           case LUA_ERRGCMM:
             client->state = CLIENT_GET_COMMAND;
+            client->needs_tx_write = 0;
             client_respond(client, "!unknown\n");
             return 0;
           };
@@ -417,7 +755,7 @@ static int client_read_command(controller_client *client) {
     // Each line is a name=value pair, until an empty line
     if ( eol == client->command_buf ) {
       client->state = CLIENT_BUSY;
-      client_invoke(client, 0);
+      client_enqueue(client);
       client->command_offs = 0;
       return 0;
     } else {
@@ -428,6 +766,7 @@ static int client_read_command(controller_client *client) {
       eq = strchr(client->command_buf, '=');
       if ( !eq ) {
         client->state = CLIENT_GET_COMMAND;
+        client->needs_tx_write = 0;
         client_respond(client, "!bad-param\n");
       } else {
         *eq = '\0';
@@ -491,6 +830,8 @@ static int client_read_command(controller_client *client) {
     break;
 
   case CLIENT_BUSY:
+  case CLIENT_WAITING_FOR_QUORUM:
+  case CLIENT_ENQUEUED:
     // Don't allow interrupts
     break;
 
@@ -544,6 +885,8 @@ static void client_read_complete(uv_stream_t *handle, ssize_t nread, const uv_bu
     }
   } else if ( nread == 0 ) {
     client_close(client);
+  } else if ( client->state == CLIENT_ENQUEUED ) {
+    client_abort(client);
   } else {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Read %zd bytes from client", nread);
     client->command_offs += nread;
@@ -556,8 +899,10 @@ static void client_accept_command(controller_client *client) {
   int err;
 
   if ( client->state != CLIENT_BUSY &&
+       client->state != CLIENT_WAITING_FOR_QUORUM &&
        client->state != CLIENT_RESPONDING &&
        client->state != CLIENT_DONE ) {
+    // We allow reads in CLIENT_WAIT_FOR_WRITE so we can detect disconnects
     err = uv_read_start((uv_stream_t *)&client->tcp, client_alloc_buffer, client_read_complete);
     if ( err < 0 ) {
       if ( err != UV_EOF )
@@ -588,6 +933,8 @@ static void client_abort(controller_client *client) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send abort");
     client_close(client);
   } else {
+    uv_read_stop((uv_stream_t *) &client->tcp);
+
     err = uv_write(&client->response, (uv_stream_t *)&client->tcp, &buf, 1, client_abort_complete);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send abort: %s", uv_strerror(err));
@@ -616,7 +963,8 @@ static void client_response_complete(uv_write_t *write, int status) {
       client_resume(client);
     } else if ( client->state == CLIENT_DONE ) {
       client_close(client);
-    } else if ( client->state != CLIENT_BUSY ) {
+    } else if ( client->state != CLIENT_BUSY &&
+                client->state != CLIENT_WAITING_FOR_QUORUM ) {
       client_accept_command(client);
     }
   }
@@ -671,6 +1019,7 @@ static void new_service(uv_stream_t *stream, int status) {
 
     lua_getglobal(g_lua, "clients");
 
+    client->prev = client->next = NULL;
     client->writing = 0;
     client->thread = lua_newthread(g_lua);
     if ( !client->thread ) {
@@ -685,6 +1034,7 @@ static void new_service(uv_stream_t *stream, int status) {
 
     client->command_offs = 0;
     client->state = CLIENT_GET_COMMAND;
+    client->needs_tx_write = 0;
 
     err = uv_tcp_init(stream->loop, &client->tcp);
     if ( err < 0 ) {
@@ -724,7 +1074,7 @@ static void new_service(uv_stream_t *stream, int status) {
   }
 }
 
-static int start_local_service(char *srvaddrstr, uv_loop_t *loop) {
+static int start_local_service(char *srvaddrstr, struct raft *raft, uv_loop_t *loop) {
   struct sockaddr_storage addr;
   int err;
 
@@ -739,6 +1089,8 @@ static int start_local_service(char *srvaddrstr, uv_loop_t *loop) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not allocate service");
     return -1;
   }
+
+  g_service->raft = raft;
 
   err = uv_tcp_init(loop, &g_service->tcp);
   if ( err < 0 ) {
@@ -876,6 +1228,7 @@ int main(int argc, char *const *argv) {
         CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add peer %s", optarg);
         return 1;
       }
+      peers++;
       break;
 
     case 'v':
@@ -902,6 +1255,12 @@ int main(int argc, char *const *argv) {
   if ( !bindaddrstr ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "No bind address and node ID provided");
     usage();
+    return 1;
+  }
+
+  err = add_peer(bindaddrstr, &raft_conf);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add ourselves as a peer");
     return 1;
   }
 
@@ -974,6 +1333,8 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
+  lua_tx_raft = &raft;
+
   err = raft_init(&raft, &io, &fsm, ourid, ouraddr);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not initialize raft: %s (%d)", raft_errmsg(&raft), err);
@@ -981,12 +1342,18 @@ int main(int argc, char *const *argv) {
   }
 
   if ( needs_bootstrap ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Bootstrapping node");
+
     err = raft_bootstrap(&raft, &raft_conf);
     if ( err != 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not bootstrap node: %s", raft_errmsg(&raft));
       return 1;
     }
   }
+
+  raft_set_snapshot_threshold(&raft, 64);
+  raft_set_snapshot_trailing(&raft, 16);
+  raft_set_pre_vote(&raft, true);
 
   err = raft_start(&raft);
   if ( err != 0 ) {
@@ -995,7 +1362,7 @@ int main(int argc, char *const *argv) {
   }
 
   if ( srvaddrstr ) {
-    err = start_local_service(srvaddrstr, &loop);
+    err = start_local_service(srvaddrstr, &raft, &loop);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not start local service");
       return 1;

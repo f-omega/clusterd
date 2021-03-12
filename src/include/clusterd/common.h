@@ -26,25 +26,60 @@
 
 #define NS_PER_SEC 1000000000
 
-typedef uint64_t clusterd_namespace_t;
-typedef uint64_t clusterd_service_t;
-typedef uint16_t clusterd_pid_t;
+typedef uint32_t clusterd_namespace_t;
+typedef uint32_t clusterd_service_t;
+typedef uint32_t clusterd_pid_t;
 
-#define NS_F   "%" PRIu64
-#define SVC_F  "%" PRIu64
-#define PID_F "%u"
+#define NS_F   "%u"
+#define SVC_F  "%u"
+#define PID_F  "%u"
 
 #define CLUSTERD_NTOH_NAMESPACE(ns) be64toh(ns)
 #define CLUSTERD_HTON_NAMESPACE(ns) htobe64(ns)
 #define CLUSTERD_NTOH_SERVICE(s)    be64toh(s)
 #define CLUSTERD_HTON_SERVICE(s)    htobe64(s)
-#define CLUSTERD_NTOH_PROCESS(i)    ntohs(i)
-#define CLUSTERD_HTON_PROCESS(i)    htons(i)
+#define CLUSTERD_NTOH_PROCESS(i)    ntohl(i)
+#define CLUSTERD_HTON_PROCESS(i)    htonl(i)
 
-#define CLUSTERD_ADDRSTRLEN 64
+#define MKSTR(x) XSTR(x)
+#define XSTR(x) #x
+
+#define CLUSTERD_ADDRSTRLEN 128
 #define CLUSTERD_ADDR_LENGTH(addr) (((struct sockaddr *)(addr))->sa_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6))
 
 #define CLUSTERD_STRUCT_FROM_FIELD(ty, field, p) ((ty *)(((uintptr_t) (p)) - offsetof(ty, field)))
+
+static inline int clusterd_addrcmp(struct sockaddr_storage *a, struct sockaddr_storage *b) {
+  struct sockaddr_in *asin, *bsin;
+  struct sockaddr_in6 *asin6, *bsin6;
+
+  if ( a->ss_family != b->ss_family ) return -1;
+
+  asin = (struct sockaddr_in *)a;
+  bsin = (struct sockaddr_in *)b;
+
+  asin6 = (struct sockaddr_in6 *)a;
+  bsin6 = (struct sockaddr_in6 *)b;
+
+  switch ( a->ss_family ) {
+  case AF_INET:
+    if ( asin->sin_addr.s_addr == bsin->sin_addr.s_addr &&
+         asin->sin_port == bsin->sin_port )
+      return 0;
+    else
+      return -1;
+
+  case AF_INET6:
+    if ( memcmp(asin6->sin6_addr.s6_addr, bsin6->sin6_addr.s6_addr, 16) == 0 &&
+         asin6->sin6_port == bsin6->sin6_port )
+      return 0;
+    else
+      return -1;
+
+  default:
+    return -1;
+  }
+}
 
 static inline void clusterd_addr_render(char *addrstr, const struct sockaddr *addr, int include_port) {
   switch ( addr->sa_family ) {

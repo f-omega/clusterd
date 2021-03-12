@@ -26,12 +26,161 @@
 #include "clusterd/common.h"
 
 #include <lauxlib.h>
+#include <raft.h>
+#include <unistd.h>
 
 extern int CLUSTERD_LOG_LEVEL;
 extern const char rc_controller_schema_sql[];
 extern const char rc_controller_api_lua[];
 
 extern sqlite3 *g_database;
+
+struct raft *lua_tx_raft = NULL;
+
+static int g_in_transaction = 0;
+int g_writes_allowed = 0;
+
+// Management of all commands in the transaction
+static struct raft_buffer g_transaction;
+
+static int g_allow_write;
+static struct raft_apply g_raft_apply;
+
+// Raft transaction handling
+
+#define CLUSTERD_TX_VERSION       1
+
+void clusterd_next_write(int status, void *result);
+
+static int clusterd_tx_ensure_transaction() {
+  int err;
+
+  if ( g_transaction.base ) return 0;
+
+  err = snprintf(NULL, 0, "--%u\n", CLUSTERD_TX_VERSION);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not format Tx version: %s", strerror(errno));
+    return -1;
+  }
+
+  g_transaction.len = err + 1;
+  g_transaction.base = raft_malloc(g_transaction.len);
+  if ( !g_transaction.base ) {
+    g_transaction.len = 0;
+    errno = ENOMEM;
+    return -1;
+  }
+
+  snprintf(g_transaction.base, g_transaction.len, "--%u\n", CLUSTERD_TX_VERSION);
+  return 0;
+}
+
+static void clusterd_tx_add(lua_State *lua, sqlite3_stmt *stmt) {
+  ssize_t cmdsz;
+  int err;
+  char *sstmt, *newbase;
+
+  err = clusterd_tx_ensure_transaction();
+  if ( err < 0 ) {
+    err = sqlite3_finalize(stmt);
+    if ( err != SQLITE_OK ) {
+      luaL_error(lua, "Could not finalize statement in error (out of memory)");
+    }
+
+    luaL_error(lua, "Out of memory");
+  }
+
+  sstmt = sqlite3_expanded_sql(stmt);
+  if ( !sstmt ) {
+    err = sqlite3_finalize(stmt);
+    if ( err != SQLITE_OK )
+      luaL_error(lua, "Could not finalize statement in error");
+    luaL_error(lua, "Could not expand SQL");
+  }
+
+  err = sqlite3_finalize(stmt);
+  if ( err != SQLITE_OK ) {
+    sqlite3_free(sstmt);
+    luaL_error(lua, "Could not finalize statement");
+  }
+
+  cmdsz = snprintf(NULL, 0, "%s%s;\n", (char *)g_transaction.base, sstmt);
+  if ( cmdsz < 0 ) {
+    int serrno = errno;
+    sqlite3_free(sstmt);
+    luaL_error(lua, "Could not add tx entry: %s", strerror(serrno));
+  }
+
+  newbase = raft_realloc(g_transaction.base, cmdsz + 1);
+  if ( !newbase ) {
+    sqlite3_free(sstmt);
+    luaL_error(lua, "Could not add tx entry: out of memory");
+  }
+
+  g_transaction.base = newbase;
+  g_transaction.len = cmdsz + 1;
+
+  strcat(g_transaction.base, sstmt);
+  strcat(g_transaction.base, ";\n");
+
+  sqlite3_free(sstmt);
+}
+
+void clusterd_tx_free() {
+  int i;
+
+  if ( g_transaction.base ) {
+    free(g_transaction.base);
+  }
+
+  g_transaction.len = 0;
+  g_transaction.base = NULL;
+}
+
+static void clusterd_tx_apply_complete(struct raft_apply *req, int status, void *result) {
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Raft application complete: %d", status);
+
+  if ( status != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Raft apply error: %s", raft_errmsg(lua_tx_raft));
+
+    if ( status == RAFT_LEADERSHIPLOST ) {
+      CLUSTERD_LOG(CLUSTERD_INFO, "Leadership lost. Will send notice to client");
+    } else {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "This will cause the abort of the transaction");
+    }
+  }
+
+  clusterd_next_write(status, result);
+}
+
+int clusterd_tx_commit() {
+  int entries_to_dismiss, err, i;
+
+  if ( !g_transaction.base ) {
+    // No data manipulation statements, the TX was read-only. return
+    return 0;
+  } else {
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "applying transaction to raft");
+    // We only have one application going on at a time. If we're here, the request can be used
+    err = raft_apply(lua_tx_raft, &g_raft_apply, &g_transaction, 1, clusterd_tx_apply_complete);
+    if ( err != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not submit transaction entries to raft: %s",
+                   raft_errmsg(lua_tx_raft));
+      clusterd_tx_free();
+
+      errno = EREMOTE;
+      return -1;
+    }
+
+    g_transaction.base = NULL;
+    g_transaction.len = 0;
+
+    // Raft quorum is asynchronous
+    errno = EAGAIN;
+    return -1;
+  }
+}
 
 static int db_schema_cb(void *ud, int ncols, char **vals, char **cols) {
   *(int*)ud = 1;
@@ -42,6 +191,14 @@ sqlite3 *clusterd_open_database(const char *path) {
   sqlite3 *db;
   char *errmsg;
   int err, had_rows = 0;
+
+  // If the path already exists, delete it. We trust raft to restore from snapshot
+  err = unlink(path);
+  if ( err < 0 ) {
+    if ( errno != ENOENT ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not unlink %s: %s", path, strerror(errno));
+    }
+  }
 
   err = sqlite3_open(path, &db);
   if ( err != SQLITE_OK ) {
@@ -97,51 +254,85 @@ static void sqlite3_lua_error(lua_State *lua, char *error, const char *what) {
   luaL_error(lua, "Could not execute sql: %s: %s", what, error);
 }
 
-static void clusterd_begin(lua_State *lua) {
-  int err, had_rows = 0;
-  char *errmsg;
-
-  err = sqlite3_exec(g_database, "BEGIN;", db_schema_cb, (void *)&had_rows, &errmsg);
-  if ( err != SQLITE_OK )
-    sqlite3_lua_error(lua, errmsg, "BEGIN");
-}
-
-static void clusterd_abort(lua_State *lua) {
-  int had_rows = 0;
-
-  sqlite3_exec(g_database, "ROLLBACK;", db_schema_cb, (void *)&had_rows, NULL);
-}
-
-static void clusterd_commit(lua_State *lua) {
-  int err, had_rows = 0;
-  char *errmsg;
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Committing transaction");
-  err = sqlite3_exec(g_database, "COMMIT;", db_schema_cb, (void *)&had_rows, &errmsg);
-  if ( err != SQLITE_OK )
-    sqlite3_lua_error(lua, errmsg, "COMMIT");
-}
-
-static int clusterd_run_update(lua_State *lua, sqlite3_stmt *stmt) {
+int clusterd_apply_tx(char *sql, size_t sqlsz, char **errmsg) {
   int err;
+  char *rbmsg;
 
-  err = sqlite3_step(stmt);
-  if ( err == SQLITE_ERROR ||
-       err == SQLITE_BUSY ||
-       err == SQLITE_MISUSE )
-    return err;
-  else if ( err == SQLITE_ROW ) {
-    clusterd_abort(lua);
+  *errmsg = NULL;
 
-    luaL_error(lua, "SQL update returned a row");
-  } else {
-    return SQLITE_OK;
+  err = sqlite3_exec(g_database, "BEGIN;", NULL, NULL, errmsg);
+  if ( err != SQLITE_OK )
+    return -1;
+
+  if ( sql[sqlsz - 1] != '\0' )
+    sql[sqlsz - 1] = '\0';
+
+  err = sqlite3_exec(g_database, sql, NULL, NULL, errmsg);
+  if ( err != SQLITE_OK )
+    goto abort;
+
+  err = sqlite3_exec(g_database, "COMMIT;", NULL, NULL, errmsg);
+  if ( err != SQLITE_OK )
+    goto abort;
+
+  *errmsg = NULL;
+  return 0;
+
+ abort:
+  err = sqlite3_exec(g_database, "ROLLBACK", NULL, NULL, &rbmsg);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not rollback transaction: %s", rbmsg);
+    return -1;
   }
+
+  return -1;
+}
+
+int clusterd_begin(char **errmsg, int writable) {
+  int err, had_rows = 0;
+
+  g_allow_write = 0;
+  err = sqlite3_exec(g_database, "BEGIN;", db_schema_cb, (void *)&had_rows, errmsg);
+  if ( err != SQLITE_OK ) {
+    return -1;
+  } else {
+    g_allow_write = writable;
+    if ( g_allow_write ) {
+      g_transaction.len = 0;
+      g_transaction.base = NULL;
+    }
+    return 0;
+  }
+}
+
+int clusterd_rollback() {
+  int err, had_rows = 0;
+  char *errmsg;
+
+  err = sqlite3_exec(g_database, "ROLLBACK;", db_schema_cb, (void *)&had_rows, &errmsg);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not rollback: %s", errmsg);
+  }
+
+  clusterd_tx_free();
+
+  if ( err != SQLITE_OK ) return -1;
+  else return 0;
+}
+
+int clusterd_commit(char **errmsg) {
+  int err, had_rows = 0;
+
+  err = sqlite3_exec(g_database, "COMMIT;", db_schema_cb, (void *)&had_rows, errmsg);
+  if ( err != SQLITE_OK ) {
+    return -1;
+  } else
+    return 0;
 }
 
 static int clusterd_lua_run(lua_State *lua) {
   const char *sql;
-  int nargs, nparams, err, i, nrow = 0;
+  int nargs, nparams, err, i, nrow = 0, raft_replicated = 0;
   sqlite3_stmt *stmt = NULL;
 
   nargs = lua_gettop(lua);
@@ -157,6 +348,16 @@ static int clusterd_lua_run(lua_State *lua) {
   err = sqlite3_prepare_v2(g_database, sql, -1, &stmt, NULL);
   if ( err != SQLITE_OK )
     goto sqlite_error;
+
+  if ( !sqlite3_stmt_readonly(stmt) ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "attempt to run update statement on state %d", raft_state(lua_tx_raft));
+    if ( !g_allow_write ) {
+      sqlite3_finalize(stmt);
+      return luaL_error(lua, "Cannot run update statements on follower node");
+    }
+
+    raft_replicated = 1;
+  }
 
   nparams = sqlite3_bind_parameter_count(stmt);
   if ( nparams > 0 && nargs == 1 ) {
@@ -188,7 +389,11 @@ static int clusterd_lua_run(lua_State *lua) {
       break;
 
     case LUA_TNUMBER:
-      err = sqlite3_bind_int64(stmt, param, lua_tonumber(lua, -1));
+      if ( lua_isinteger(lua, -1) ) {
+        err = sqlite3_bind_int64(stmt, param, lua_tointeger(lua, -1));
+      } else {
+        err = sqlite3_bind_double(stmt, param, lua_tonumber(lua, -1));
+      }
       break;
 
     case LUA_TBOOLEAN:
@@ -292,9 +497,13 @@ static int clusterd_lua_run(lua_State *lua) {
   if ( err != SQLITE_DONE )
     goto sqlite_error;
 
-  err = sqlite3_finalize(stmt);
-  if ( err != SQLITE_OK ) {
-    return luaL_error(lua, "Could not finalize statement");
+  if ( raft_replicated )
+    clusterd_tx_add(lua, stmt);
+  else {
+    err = sqlite3_finalize(stmt);
+    if ( err != SQLITE_OK ) {
+      return luaL_error(lua, "Could not finalize statement");
+    }
   }
 
   lua_pushnil(lua); // No error
@@ -314,32 +523,6 @@ static int clusterd_lua_run(lua_State *lua) {
 
   // Now it's result(nil) and error
   return 2;
-}
-
-static int clusterd_lua_tx_cont(lua_State *lua, int err, lua_KContext ctx) {
-  if ( err == LUA_OK || err == LUA_YIELD ) {
-    clusterd_commit(lua);
-  } else {
-    if ( err == LUA_ERRRUN ) {
-      CLUSTERD_LOG(CLUSTERD_DEBUG, "Transaction error: %s", lua_tostring(lua, -1));
-    } CLUSTERD_LOG(CLUSTERD_DEBUG, "Non-runtime error in api.tx: %d", err);
-
-    clusterd_abort(lua);
-    lua_error(lua); // "Rethrow" the error
-  }
-
-  return 1;
-}
-
-static int clusterd_lua_tx(lua_State *lua) {
-  int err;
-
-  if ( lua_gettop(lua) != 1 || !lua_isfunction(lua, 1) )
-    return luaL_error(lua, "internal.tx must be called with just the transaction body");
-
-  clusterd_begin(lua);
-
-  return clusterd_lua_tx_cont(lua, lua_pcallk(lua, 0, 1, 0, 0, clusterd_lua_tx_cont), 0);
 }
 
 static int clusterd_lua_log(lua_State *lua) {
@@ -397,7 +580,6 @@ int luaopen_clusterd(lua_State *lua) {
   REGISTER_INT("crit", CLUSTERD_CRIT);
 
   REGISTER_FUNC("run", clusterd_lua_run);
-  REGISTER_FUNC("tx", clusterd_lua_tx);
   REGISTER_FUNC("is_valid_ip", clusterd_lua_is_valid_ip);
 
   lua_setglobal(lua, "internal");

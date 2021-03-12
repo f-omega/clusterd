@@ -29,6 +29,8 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <locale.h>
+#include <time.h>
+#include <stdlib.h>
 
 #define FORMAT_NAMESPACE_DEF                                    \
   "function format_namespace(row)\n"                            \
@@ -60,7 +62,7 @@ enum CLUSTERNS_ACTION
 
 #define OPEN_CLUSTER                                                    \
   if ( performed == 0 ) {                                               \
-    err = clusterctl_open(&ctl, require_consistent);                    \
+    err = clusterctl_open(&ctl);                                        \
     if ( err < 0 ) {                                                    \
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not connect to controller: %s", strerror(errno)); \
       return 1;                                                         \
@@ -82,14 +84,15 @@ static void usage() {
 }
 
 int main(int argc, char *const *argv) {
-  int c, err, require_consistent = CLUSTERCTL_INCONSISTENT_OK;
+  int c, err;
   int action = CLUSTERNS_LIST, performed = 0, success = 0, error = 0, was_success = 0;
-
+  clusterctl_tx_level txlvl = CLUSTERCTL_STALE_READS;
   clusterctl ctl;
 
   const char *action_name;
 
   setlocale(LC_ALL, "C");
+  srandom(time(NULL));
 
   while ( (c = getopt(argc, argv, "-ADvhc")) != -1 ) {
     switch ( c ) {
@@ -99,21 +102,21 @@ int main(int argc, char *const *argv) {
       case CLUSTERNS_LIST:
         OPEN_CLUSTER;
         action_name = "get";
-        err = clusterctl_simple(&ctl, list_one_lua,
+        err = clusterctl_simple(&ctl, txlvl, list_one_lua,
                                 "nameorid", optarg, NULL);
         break;
 
       case CLUSTERNS_ADD:
         OPEN_CLUSTER;
         action_name = "add";
-        err = clusterctl_simple(&ctl, add_one_lua,
+        err = clusterctl_simple(&ctl, CLUSTERCTL_MAY_WRITE, add_one_lua,
                                 "name", optarg, NULL);
         break;
 
       case CLUSTERNS_DELETE:
         OPEN_CLUSTER;
         action_name = "delete";
-        err = clusterctl_simple(&ctl, delete_one_lua,
+        err = clusterctl_simple(&ctl, CLUSTERCTL_MAY_WRITE, delete_one_lua,
                                 "nameorid", optarg, NULL);
         break;
 
@@ -153,7 +156,7 @@ int main(int argc, char *const *argv) {
         return 1;
       }
 
-      require_consistent = CLUSTERCTL_REQUIRE_CONSISTENT;
+      txlvl = CLUSTERCTL_MAY_WRITE;
       if ( c == 'A' )
         action = CLUSTERNS_ADD;
       else
@@ -166,7 +169,7 @@ int main(int argc, char *const *argv) {
         return 1;
       }
 
-      require_consistent = CLUSTERCTL_REQUIRE_CONSISTENT;
+      txlvl = CLUSTERCTL_CONSISTENT_READS;
       break;
 
     case 'v':
@@ -196,13 +199,13 @@ int main(int argc, char *const *argv) {
     case CLUSTERNS_LIST:
       OPEN_CLUSTER;
       action_name = "list";
-      err = clusterctl_simple(&ctl, list_all_lua, NULL);
+      err = clusterctl_simple(&ctl, txlvl, list_all_lua, NULL);
       break;
 
     case CLUSTERNS_ADD:
       OPEN_CLUSTER;
       action_name = "add";
-      err = clusterctl_simple(&ctl, add_one_lua, NULL);
+      err = clusterctl_simple(&ctl, CLUSTERCTL_MAY_WRITE, add_one_lua, NULL);
       break;
 
     case CLUSTERNS_DELETE:

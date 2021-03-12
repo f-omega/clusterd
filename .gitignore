@@ -21,3 +21,6 @@ clusterd-service
 clusterd-monitor
 clusterd-host
 clusterd-controller
+clusterd-exec
+clusterd-ps
+libclusterctllib.a

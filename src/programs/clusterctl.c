@@ -33,6 +33,7 @@
 #include <limits.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <time.h>
 #include <locale.h>
 
 #define MAX_PARAMETER_SZ 64 * 1024
@@ -69,16 +70,20 @@ int main(int argc, char *const *argv) {
   int c;
 
   const char *script_path = NULL;
-  int readonly = 1, save = 0, readenv = 0, force_consistent = 0, read_error = 0;
+  int save = 0, readenv = 0, force_consistent = 0, read_error = 0;
   size_t remaining, written;
   ssize_t err;
 
   char line_buf[128 * 1024];
   size_t line_sz = 0;
 
+  clusterctl_tx_level txlvl = CLUSTERCTL_STALE_READS;
+
   clusterctl ctl;
 
   setlocale(LC_ALL, "C");
+  srandom(time(NULL));
+
   while ((c = getopt(argc, argv, "-vhwpcdD:")) != -1) {
     switch (c) {
     case 1:
@@ -90,7 +95,8 @@ int main(int argc, char *const *argv) {
       break;
 
     case 'c':
-      force_consistent = 1;
+      if ( txlvl != CLUSTERCTL_MAY_WRITE )
+        txlvl = CLUSTERCTL_CONSISTENT_READS;
       break;
 
     case 'D':
@@ -115,7 +121,7 @@ int main(int argc, char *const *argv) {
       break;
 
     case 'w':
-      readonly = 0;
+      txlvl = CLUSTERCTL_MAY_WRITE;
       break;
 
     case 'v':
@@ -136,7 +142,7 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "You must provide a script if using -e");
   }
 
-  err = clusterctl_open(&ctl, readonly == 0 || force_consistent);
+  err = clusterctl_open(&ctl);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not connect to controller: %s", strerror(errno));
     return 1;
@@ -152,7 +158,7 @@ int main(int argc, char *const *argv) {
     //    err = clusterctl_invoke_sha256(&ctl, _);
     return 3;
   } else {
-    err = clusterctl_begin_custom(&ctl);
+    err = clusterctl_begin_custom(&ctl, txlvl);
   }
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send command: %s", strerror(errno));

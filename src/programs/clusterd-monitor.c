@@ -46,7 +46,6 @@ static int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
 typedef struct {
   clusterd_namespace_t namespace;
-  clusterd_service_t   service;
   clusterd_pid_t       process;
 } process_key;
 
@@ -101,9 +100,8 @@ static void process_fails(uv_timer_t *hdl) {
   int cmdlineix = 0, err, i;
   pid_t child;
 
-  CLUSTERD_LOG(CLUSTERD_ERROR, "Process %llu:%llu:%u failed",
-               (unsigned long long)process->key.namespace,
-               (unsigned long long)process->key.service,
+  CLUSTERD_LOG(CLUSTERD_ERROR, "Process %u:%u failed",
+               (unsigned)process->key.namespace,
                (unsigned)process->key.process);
 
   if ( getenv("CLUSTERD_SERVICE_DOCTOR") ) {
@@ -112,9 +110,8 @@ static void process_fails(uv_timer_t *hdl) {
 
   HASH_DELETE(hh, g_processes, process);
 
-  err = snprintf(cmdline, sizeof(cmdline), "%s -n %llu -s %llu -i %u",
-                 service_doctor, (unsigned long long)process->key.namespace,
-                 (unsigned long long)process->key.service,
+  err = snprintf(cmdline, sizeof(cmdline), "%s -n %u -i %u",
+                 service_doctor, process->key.namespace,
                  (unsigned)process->key.process);
   if ( err >= sizeof(cmdline) ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Cannot launch service doctor. Not enough space in cmdline");
@@ -140,9 +137,8 @@ static void process_fails(uv_timer_t *hdl) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Failure launching service doctor: %s", strerror(errno));
     goto done;
   } else if ( child != 0 ) {
-    CLUSTERD_LOG(CLUSTERD_INFO, "Launched service doctor for %llu:%llu:%u with pid %u",
-                 (unsigned long long)process->key.namespace,
-                 (unsigned long long)process->key.service,
+    CLUSTERD_LOG(CLUSTERD_INFO, "Launched service doctor for %u:%u with pid %u",
+                 (unsigned)process->key.namespace,
                  (unsigned)process->key.process,
                  (unsigned)child);
   } else {
@@ -164,9 +160,8 @@ static void process_timeout(uv_timer_t *hdl) {
   process->success_count = 0;
 
   if ( process->state == PROCESS_STATE_ACTIVE ) {
-    CLUSTERD_LOG(CLUSTERD_WARNING, "Process %llu:%llu:%u degraded",
-                 (unsigned long long)process->key.namespace,
-                 (unsigned long long)process->key.service,
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Process %u:%u degraded",
+                 (unsigned)process->key.namespace,
                  (unsigned)process->key.process);
     err = uv_timer_start(&process->failure_timer, process_fails, g_failure_timeout, 0);
     if ( err < 0 ) {
@@ -205,9 +200,8 @@ static int touch_process(process_record *process, const struct sockaddr *addr, u
 
   if ( process->success_count >= g_success_threshold &&
        process->state == PROCESS_STATE_DEGRADED ) {
-    CLUSTERD_LOG(CLUSTERD_INFO, "Process %llu:%llu:%u reactivating",
-                 (unsigned long long)process->key.namespace,
-                 (unsigned long long)process->key.service,
+    CLUSTERD_LOG(CLUSTERD_INFO, "Process %u::%u reactivating",
+                 (unsigned)process->key.namespace,
                  (unsigned)process->key.process);
     process->state = PROCESS_STATE_ACTIVE;
 
@@ -254,7 +248,7 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
   size_t attr_len;
   void *attr_value;
 
-  int has_namespace = 0, has_service = 0, has_process = 0, mon_count = 0, err;
+  int has_namespace = 0, has_process = 0, mon_count = 0, err;
   unsigned int interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 
   process_key key;
@@ -315,20 +309,6 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
 
       has_namespace = 1;
       key.namespace = CLUSTERD_NTOH_NAMESPACE(*(clusterd_namespace_t *)attr_value);
-      break;
-
-    case CLUSTERD_ATTR_SERVICE:
-      if ( has_service ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Monitor request contains two or more services. Ignoring");
-        return;
-      }
-      if ( attr_len != sizeof(clusterd_service_t) ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Service attribute has incorrect length. Ignoring");
-        return;
-      }
-
-      has_service = 1;
-      key.service = CLUSTERD_NTOH_SERVICE(*(clusterd_service_t *) attr_value);
       break;
 
     case CLUSTERD_ATTR_PROCESS:
@@ -395,7 +375,6 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
   }
 
   if ( !has_process ||
-       !has_service ||
        !has_namespace ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Monitor request incomplete. Ignoring");
     return;
@@ -405,9 +384,8 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
   HASH_FIND(hh, g_processes, &key, sizeof(process_key), existing);
 
   if ( !existing ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %llu:%llu:%u does not exist. Creating...",
-                 (unsigned long long)key.namespace,
-                 (unsigned long long)key.service,
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u does not exist. Creating...",
+                 (unsigned)key.namespace,
                  (unsigned)key.process);
     err = create_process(&key, addr, interval, monitors, mon_count);
     if ( err < 0 ) {
@@ -415,9 +393,8 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
       return;
     }
   } else {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %llu:%llu:%u already exists. Touching...",
-                 (unsigned long long)key.namespace,
-                 (unsigned long long)key.service,
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u already exists. Touching...",
+                 (unsigned)key.namespace,
                  (unsigned)key.process);
     err = touch_process(existing, addr, interval, monitors, mon_count);
     if ( err < 0 ) {

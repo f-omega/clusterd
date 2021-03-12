@@ -47,9 +47,22 @@ add_executable(clusterd-controller src/programs/clusterd-controller.c src/progra
   src/programs/sha256.c ${controller_rc})
 target_link_libraries(clusterd-controller ${LIBUV_LIBRARIES} ${RAFT_LIBRARIES} ${LUA_LIBRARIES} ${SQLite3_LIBRARIES})
 
-add_executable(clusterctl src/programs/clusterctl.c src/programs/libclusterctl.c src/programs/sha256.c)
-add_executable(clusterd-ns src/programs/clusterd-ns.c src/programs/libclusterctl.c src/programs/sha256.c)
-add_executable(clusterd-service src/programs/clusterd-service.c src/programs/libclusterctl.c src/programs/sha256.c)
-add_executable(clusterd-host src/programs/clusterd-host.c src/programs/libclusterctl.c src/programs/sha256.c)
-target_link_libraries(clusterd-host ${LIBUV_LIBRARIES})
+add_library(clusterctllib STATIC src/programs/libclusterctl.c src/programs/sha256.c)
 
+add_executable(clusterctl src/programs/clusterctl.c)
+target_link_libraries(clusterctl clusterctllib)
+
+add_executable(clusterd-ns src/programs/clusterd-ns.c)
+target_link_libraries(clusterd-ns clusterctllib)
+
+add_executable(clusterd-service src/programs/clusterd-service.c)
+target_link_libraries(clusterd-service clusterctllib)
+
+add_executable(clusterd-host src/programs/clusterd-host.c)
+target_link_libraries(clusterd-host clusterctllib ${LIBUV_LIBRARIES})
+
+add_executable(clusterd-exec src/programs/clusterd-exec.c)
+target_link_libraries(clusterd-exec clusterctllib)
+
+add_executable(clusterd-ps src/programs/clusterd-ps.c)
+target_link_libraries(clusterd-ps clusterctllib)

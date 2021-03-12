@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS namespace
-  ( ns_id         INTEGER PRIMARY KEY --  The namespace ID. Stored shifted down by 2 ^ 63
+  ( ns_id         INTEGER PRIMARY KEY --  The namespace ID
   , ns_label      TEXT                -- Namespace name, if given
+
   , CONSTRAINT ns_label_unique UNIQUE(ns_label)
   );
 
@@ -102,7 +103,7 @@ CREATE TABLE IF NOT EXISTS process
   , ps_state      TEXT NOT NULL
   , ps_placement  TEXT
 
-  , PRIMARY KEY(ps_ns, ps_svc, ps_id)
+  , PRIMARY KEY(ps_ns, ps_id)
   , CONSTRAINT ps_service_fk
       FOREIGN KEY (ps_svc, ps_ns)
       REFERENCES service(s_id, s_namespace)
