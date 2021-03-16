@@ -160,11 +160,12 @@ static int is_valid_sha256(const char *s) {
 
 static void usage() {
   fprintf(stderr, "clusterd-controller -- clusterd controller daemon\n");
-  fprintf(stderr, "Usage: clusterd-controller -vh [-j address...] -S ADDR\n");
+  fprintf(stderr, "Usage: clusterd-controller -vhB [-j address...] -S ADDR\n");
   fprintf(stderr, "         nodeid/bindaddress /path/to/state/dir\n\n");
   fprintf(stderr, "   -j ADDR          When bootstrapping, specify this option\n");
   fprintf(stderr, "                    for each peer in the cluster\n");
   fprintf(stderr, "   -S SERVICEADDR   Address to serve the local service on\n");
+  fprintf(stderr, "   -B               Force a bootstrap on this node, even if state dir exists\n");
   fprintf(stderr, "   -h               Show this help menu\n");
   fprintf(stderr, "   -v               Show verbose debugging output\n\n");
   fprintf(stderr, "Please report bugs to support@f-omega.com\n");
@@ -1199,7 +1200,7 @@ int main(int argc, char *const *argv) {
   fsm.snapshot = clusterd_snapshot;
   fsm.restore = clusterd_restore;
 
-  while ((c = getopt(argc, argv, "-vhj:S:")) != -1) {
+  while ((c = getopt(argc, argv, "-vhBj:S:")) != -1) {
     switch (c) {
     case 1:
       /* Positional argument */
@@ -1212,6 +1213,10 @@ int main(int argc, char *const *argv) {
         usage();
         return 1;
       }
+      break;
+
+    case 'B':
+      needs_bootstrap = 1;
       break;
 
     case 'S':

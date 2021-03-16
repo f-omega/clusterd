@@ -74,7 +74,7 @@ whatever system you'd like to order them.
 * `-A` <IP-OVERRIDE>:
   By default, `clusterd-rollcall` will determine the node IP by using
   the route used to connect to the clusterd controllers (as given in
-  the `CLUSTERD_CONTROLLERS` environment variable, see below).
+  the `CLUSTERD_CONTROLLER` environment variable, see below).
 * `-v`:
   Display verbose debug output
 * `-h`:
