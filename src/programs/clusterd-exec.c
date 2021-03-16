@@ -211,20 +211,24 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
     return err;
   }
 
+  new_argv = calloc(argc + 64 + 1, sizeof(char *));
+  if ( !new_argv ) goto nomem;
+
   if ( strncmp(ourname, nodeaddr, sizeof(ourname)) == 0 ) {
-    new_argv = calloc(argc + 7 + 1, sizeof(char *));
-    if ( !new_argv ) goto nomem;
-    cmd = "clusterd-host";
-    new_argv[argind++] = "clusterd-host";
+    cmd = "sudo";
   } else {
     cmd = "ssh";
-    new_argv = calloc(argc + 11 + 1, sizeof(char *));
-    if ( !new_argv ) goto nomem;
     new_argv[argind++] = "ssh";
     new_argv[argind++] = "-l";
     new_argv[argind++] = "clusterd";
     new_argv[argind++] = nodeaddr;
   }
+
+  new_argv[argind++] = "sudo";
+  new_argv[argind++] = "clusterd-host";
+
+  if ( CLUSTERD_LOG_LEVEL == CLUSTERD_DEBUG )
+    new_argv[argind++] = "-v";
 
   new_argv[argind++] = "-p";
   new_argv[argind++] = pidstr;
@@ -253,7 +257,7 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
 
     close(sts[0]);
 
-    execv(cmd, (char * const*)new_argv);
+    execvp(cmd, (char * const*)new_argv);
 
     serrno = errno;
     err = write(sts[1], &serrno, sizeof(serrno));
@@ -370,6 +374,10 @@ int main(int argc, char *const *argv) {
 
     case 'i':
       redirect_stdout = 1;
+      break;
+
+    case 'v':
+      CLUSTERD_LOG_LEVEL = CLUSTERD_DEBUG;
       break;
 
     default:

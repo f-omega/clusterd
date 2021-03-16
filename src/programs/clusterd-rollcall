@@ -105,4 +105,4 @@ clusterd.update_node("${NODE_ID}", {
 EOF
 }
 
-make_node_update | ${CLUSTERD_BIN}clusterctl
+make_node_update | ${CLUSTERD_BIN}clusterctl -w

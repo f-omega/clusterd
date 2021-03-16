@@ -754,6 +754,7 @@ static int client_read_command(controller_client *client) {
   case CLIENT_ACCEPT_PARAMETERS:
     // Each line is a name=value pair, until an empty line
     if ( eol == client->command_buf ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Enqueueing command");
       client->state = CLIENT_BUSY;
       client_enqueue(client);
       client->command_offs = 0;
@@ -1091,6 +1092,7 @@ static int start_local_service(char *srvaddrstr, struct raft *raft, uv_loop_t *l
   }
 
   g_service->raft = raft;
+  g_service->processing_head = g_service->processing_tail = NULL;
 
   err = uv_tcp_init(loop, &g_service->tcp);
   if ( err < 0 ) {

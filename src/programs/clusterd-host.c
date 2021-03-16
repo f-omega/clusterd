@@ -24,10 +24,12 @@
 #include "clusterd/log.h"
 #include "clusterd/common.h"
 #include "clusterd/request.h"
+#include "config.h"
 #include "libclusterctl.h"
 
 #include <string.h>
 #include <time.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <locale.h>
@@ -107,6 +109,13 @@ int                g_socket6 = -1;
 int             g_max_socket = 0;
 int       g_max_mon_failures = 3;
 int      g_cooloff_period_ms = 1000;
+
+uid_t         g_ns_uid_lower = 0;
+unsigned int  g_ns_uid_count = 0;
+
+uid_t             g_root_uid = 0;
+
+gid_t          g_clusterd_gid = 0;
 
 unsigned int g_ping_interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 FILE *g_urandom = NULL;
@@ -212,11 +221,176 @@ static int parse_service_details(char *info, clusterd_namespace_t *ns, clusterd_
   return 0;
 }
 
-static int make_process_directory() {
+static int make_status_pipe() {
+  char pipe_path[PATH_MAX];
   int err;
 
-  err = snprintf(g_ps_path, sizeof(g_ps_path), "%s/proc/" NS_F ":" SVC_F ":" PID_F,
-                 clusterd_get_runtime_dir(), g_nsid, g_sid, g_pid);
+  err = snprintf(pipe_path, sizeof(pipe_path), "%s/cmd", g_ps_path);
+  if ( err >= sizeof(pipe_path) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Process command pipe would be too long");
+
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = mkfifo(pipe_path, 0400);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create fifo: %s", strerror(errno));
+    return -1;
+  }
+
+  // Now open the fifo in nonblock mode
+  err = open(pipe_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if ( err < 0 ) {
+    int serrno = errno;
+
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open pipe: %s", strerror(errno));
+
+    err = unlink(pipe_path);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unlink bad pipe: %s", strerror(errno));
+    }
+
+    errno = serrno;
+    return -1;
+  }
+
+  return err;
+}
+
+static int rm_recursive(DIR *dir) {
+  struct dirent *ent;
+  DIR *lower;
+  int fd, lowerfd, err;
+
+  fd = dirfd(dir);
+  if ( fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get fd for directory: %s", strerror(errno));
+    return -1;
+  }
+
+  while ( (errno = 0, ent = readdir(dir)) ) {
+    switch ( ent->d_type ) {
+    case DT_BLK:
+    case DT_CHR:
+    case DT_FIFO:
+    case DT_LNK:
+    case DT_REG:
+    case DT_SOCK:
+      err = unlinkat(fd, ent->d_name, 0);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not remove file %s: %s", ent->d_name, strerror(errno));
+        return -1;
+      }
+      break;
+
+    case DT_DIR:
+      lowerfd = openat(fd, ent->d_name, O_DIRECTORY | O_RDONLY);
+      if ( lowerfd < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open directory %s: %s", ent->d_name, strerror(errno));
+        return -1;
+      }
+
+      lower = fdopendir(lowerfd);
+      if ( !lower ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not fdopendir() directory %s: %s", ent->d_name, strerror(errno));
+        close(lowerfd);
+        return -1;
+      }
+
+      lowerfd = -1;
+
+      err = rm_recursive(lower);
+      if ( err < 0 ) {
+        err = closedir(lower);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Could not close directory %s: %s", ent->d_name, strerror(errno));
+        }
+        return -1;
+      }
+
+      err = closedir(lower);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not close directory %s: %s", ent->d_name, strerror(errno));
+        return -1;
+      }
+
+      err = unlinkat(fd, ent->d_name, AT_REMOVEDIR);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not remove directory %s: %s", ent->d_name, strerror(errno));
+        return -1;
+      }
+
+    case DT_UNKNOWN:
+    default:
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Unknown file %s", ent->d_name);
+    }
+  }
+}
+
+static void clean_process_directory() {
+  DIR *psdir;
+  int err;
+
+  psdir = opendir(g_ps_path);
+  if ( !psdir ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not open() process dir: %s: %s", g_ps_path, strerror(errno));
+    return;
+  }
+
+  err = rm_recursive(psdir);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process directory: %s", strerror(errno));
+    err = closedir(psdir);
+    if ( err < 0 )
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not close process directory: %s", strerror(errno));
+    return;
+  }
+
+  err = closedir(psdir);
+  if ( err < 0 )
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not close process directory: %s", strerror(errno));
+
+  err = rmdir(g_ps_path);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process directory: %s", strerror(errno));
+  }
+}
+
+static int check_process_exists() {
+  char cmdpipepath[PATH_MAX];
+  int err, cmdpipe;
+
+  err = snprintf(cmdpipepath, sizeof(cmdpipepath), "%s/cmd", g_ps_path);
+  if ( err >= sizeof(cmdpipepath) ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not construct command pipe path");
+
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  cmdpipe = open(cmdpipepath, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if ( cmdpipe < 0 ) {
+    if ( errno == ENXIO ) {
+      // Process does not exist
+      return 0;
+    } else {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not open command pipe: %s", strerror(errno));
+      return -1;
+    }
+  } else {
+    // Since we could open the pipe, the other end exists. A process is running
+    close(cmdpipe);
+    return 1;
+  }
+}
+
+static int make_process_directory() {
+  int err;
+  struct stat dirstat;
+
+  err = snprintf(g_ps_path, sizeof(g_ps_path), "%s/proc/" NS_F "/" PID_F,
+                 clusterd_get_runtime_dir(), g_nsid, g_pid);
   if ( err >= sizeof(g_ps_path) ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Process directory would be too long");
 
@@ -224,9 +398,47 @@ static int make_process_directory() {
     return -1;
   }
 
+  // Check if the path exists. If it's a directory, attempt to
+  // communicate with the process inside
+  err = stat(g_ps_path, &dirstat);
+  if ( err < 0 ) {
+    if ( errno != ENOENT ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not stat process directory %s: %s",
+                   g_ps_path, strerror(errno));
+      return -1;
+    }
+  } else {
+    // Stat was successful. If it's a directory, we can continue,
+    // otherwise it's a critical error.
+    if ( dirstat.st_mode & S_IFDIR ) {
+      // This may be a process directory, attempt to communicate
+      err = check_process_exists();
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not determine if existing process directory contains a process: %s",
+                     strerror(errno));
+        return -1;
+      } else if ( err > 0 ) {
+        // This contains a process, and it's running
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "This process already exists!");
+        errno = EEXIST;
+        return -1;
+      }
+    } else {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Process directory %s already exists and is not a directory: %s",
+                   g_ps_path, strerror(errno));
+      return -1;
+    }
+  }
+
   err = mkdir_recursive(g_ps_path);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create %s: %s", g_ps_path, strerror(errno));
+    return -1;
+  }
+
+  err = chdir(g_ps_path);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set process working dir: %s", strerror(errno));
     return -1;
   }
 
@@ -342,6 +554,24 @@ static void start_process_doctor() {
   exit(100);
 }
 
+static int drop_privileges() {
+  int err;
+
+  err = setgid(g_clusterd_gid);
+  if  ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not setgid(%u): %s", g_clusterd_gid, strerror(errno));
+    return -1;
+  }
+
+  err = setuid(g_root_uid);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not setuid(%u): %s", g_root_uid, strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
 static int download_image(const char *image, char *realpath, size_t realpathsz) {
   char dlimage[PATH_MAX];
   pid_t child;
@@ -378,6 +608,12 @@ static int download_image(const char *image, char *realpath, size_t realpathsz) 
     /* Set CLUSTERD_IMAGES environment to default, but don't overwrite
      * if it exists */
     setenv("CLUSTERD_IMAGES", CLUSTERD_DEFAULT_IMAGE_PATH, 0);
+
+    err = drop_privileges();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges in dlimage: %s", strerror(errno));
+      exit(101);
+    }
 
     err = execl(dlimage, "dlimage", image, realpath, NULL);
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute dlimage script: %s", strerror(errno));
@@ -566,13 +802,22 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     return -1;
   }
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting service");
+
   child = fork();
   if ( child < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fork() to start service: %s", strerror(errno));
     return -1;
   } else if ( child == 0 ) {
+    char ns_path[PATH_MAX];
     unsigned char one = 1;
     close(stspipe[0]);
+
+    strncpy(ns_path, g_ps_path, sizeof(ns_path));
+    basename(ns_path);
+
+    setenv("CLUSTERD_NS_DIR", ns_path, 1);
+    setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
 
     err = sigprocmask(SIG_SETMASK, oldmask, NULL);
     if ( err < 0 ) {
@@ -588,9 +833,9 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
       exit(100);
     }
 
-    err = chdir(g_ps_path);
+    err = drop_privileges();
     if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set process working dir: %s", strerror(errno));
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges: %s", strerror(errno));
       exit(100);
     }
 
@@ -736,10 +981,9 @@ static void process_failure(pid_t *ps, int sts, sigset_t *oldmask) {
       goto send_errno;
     }
 
-    // Set home directory
-    err = chdir(g_ps_path);
+    err = drop_privileges();
     if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set finish script home dir: %s", strerror(errno));
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges: %s", strerror(errno));
       goto send_errno;
     }
 
@@ -856,6 +1100,65 @@ static int setup_signals(sigset_t *mask) {
   return 0;
 }
 
+static void deliver_signal(int s) {
+  int err;
+  switch (g_state) {
+  case PROCESS_STARTED:
+    err = kill(g_pid, s);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not deliver signal %d: %s", s, strerror(errno));
+      return;
+    }
+    break;
+
+  default:
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not deliver signal %d: process not running", s);
+    break;
+  }
+}
+
+static void exec_command(char c) {
+  switch ( c ) {
+  case 't': deliver_signal(SIGTERM); break;
+  case 'k': deliver_signal(SIGKILL); break;
+  case 'q': deliver_signal(SIGQUIT); break;
+  case 'i': deliver_signal(SIGINT); break;
+  case '1': deliver_signal(SIGUSR1); break;
+  case '2': deliver_signal(SIGUSR2); break;
+  case 's': deliver_signal(SIGSTOP); break;
+  case 'c': deliver_signal(SIGCONT); break;
+  case 'h': deliver_signal(SIGHUP); break;
+
+  default:
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not figure out command %c", c);
+  }
+}
+
+static void process_command(int stspipe, fd_set *rfds, fd_set *efds) {
+  ssize_t err;
+
+  if ( FD_ISSET(stspipe, efds) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Error reading from status pipe");
+    return;
+  }
+
+  if ( FD_ISSET(stspipe, rfds) ) {
+    // Read command characters from the pipe
+    char commands[16];
+    int i;
+
+    err = read(stspipe, commands, sizeof(commands));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read from pipe: %s", strerror(errno));
+      return;
+    }
+
+    for ( i = 0; i < err; ++i ) {
+      exec_command(commands[i]);
+    }
+  }
+}
+
 static void process_socket(int *sk, int family, fd_set *rfd, fd_set *efd) {
   int err;
 
@@ -891,6 +1194,9 @@ static void kill_process(pid_t ps) {
   int err;
 
   err = kill(ps, SIGKILL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not send SIGKILL to %u: %s", ps, strerror(errno));
+  }
 }
 
 static void relay_signal(pid_t ps) {
@@ -912,27 +1218,137 @@ static void relay_signal(pid_t ps) {
     return;
   }
 
-  g_state = PROCESS_DYING;
+
   switch ( g_down_signal ) {
-  default:
+  default: break;
+
   case SIGTERM:
+    g_state = PROCESS_DYING;
     timespec_add_ms(&g_next_kill, DEFAULT_SIGTERM_GRACE);
     break;
 
   case SIGQUIT:
+    g_state = PROCESS_DYING;
     timespec_add_ms(&g_next_kill, DEFAULT_SIGQUIT_GRACE);
     break;
   }
 }
 
+static int read_gid_and_uid_ranges(const char *key, const char *value) {
+  if ( strcmp(key, CLUSTERD_CONFIG_NS_UID_RANGE_KEY) == 0 ) {
+    return clusterd_parse_uid_range(value, &g_ns_uid_lower, &g_ns_uid_count);
+  } else if ( strcmp(key, CLUSTERD_CONFIG_GROUP_NAME) == 0 ) {
+    return clusterd_parse_group(value, &g_clusterd_gid);
+  } else {
+    // Typically, we ignore unknown keys
+    return 0;
+  }
+}
+
+static pid_t daemonize() {
+  pid_t child, sessid, grandchild;
+  int stspipe[2], err;
+
+  err = pipe(stspipe);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not create status pipe in daemonize: %s", strerror(errno));
+    return -1;
+  }
+
+  child = fork();
+  if ( child < 0 ) {
+    close(stspipe[0]);
+    close(stspipe[1]);
+    return child;
+  }
+
+  if ( child == 0 ) {
+    close(stspipe[0]);
+
+    // The child needs to call setsid to become the session leader, then fork again
+    sessid = setsid();
+    if ( sessid < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not create session: %s", strerror(errno));
+      goto send_errno;
+    }
+
+    grandchild = fork();
+    if ( grandchild < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not perform second fork(): %s", strerror(errno));
+      goto send_errno;
+    }
+
+    if ( grandchild == 0 ) {
+      close(stspipe[1]);
+      return 0; // We are the grandchild
+    }
+
+    errno = 0;
+  send_errno:
+    // In the child, we first send the success errno (0), then we send
+    // the grandchild pid
+    err = write(stspipe[1], &errno, sizeof(errno));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not write errno to stspipe");
+      exit(EXIT_FAILURE);
+    }
+
+    if ( errno != 0 ) {
+      exit(EXIT_FAILURE);
+    }
+
+    // Send the child PID
+    err = write(stspipe[1], &grandchild, sizeof(grandchild));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not write grandchild to stspipe");
+      exit(EXIT_FAILURE);
+    }
+
+    exit(EXIT_SUCCESS);
+  } else {
+    int child_errno;
+
+    close(stspipe[1]);
+
+    // Attempt to read errno from child, then wait for child to exit
+    err = read(stspipe[0], &child_errno, sizeof(child_errno));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read child errno: %s", strerror(errno));
+      close(stspipe[0]);
+      return -1;
+    }
+
+    if ( child_errno != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "While daemonizing, child got error: %s", strerror(errno));
+      close(stspipe[0]);
+
+      errno = child_errno;
+      return -1;
+    }
+
+    err = read(stspipe[0], &grandchild, sizeof(grandchild));
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read grandchild pid from pipe: %s", strerror(errno));
+      close(stspipe[0]);
+      return -1;
+    }
+
+    close(stspipe[0]);
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Launched grandchild: %u", grandchild);
+
+    return grandchild;
+  }
+}
+
 int main(int argc, char *const *argv) {
-  int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0;
+  int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, stspipe;
   const char *namespace = "default", *service = NULL;
   char realpath[PATH_MAX], path[PATH_MAX], *pidend;
   char s_info[PATH_MAX*3];
   char *const *svargv;
   clusterctl ctl;
-  pid_t ps;
+  pid_t ps, daemon_pid;
   sigset_t smask;
 
   setlocale(LC_ALL, "C");
@@ -1003,6 +1419,24 @@ int main(int argc, char *const *argv) {
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p)", service, argv[firstarg]);
 
+  /* Read the system configuration */
+  err = clusterd_read_system_config(read_gid_and_uid_ranges);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not parse system configuration: %s", strerror(errno));
+    return 1;
+  }
+
+  if ( g_ns_uid_lower == 0 ||
+       (g_ns_uid_lower + g_ns_uid_count - 1) <= g_ns_uid_lower ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid UID range in system configuration: %s", strerror(errno));
+    return 1;
+  }
+
+  if ( g_clusterd_gid == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "No clusterd gid specified in system configuration");
+    return 1;
+  }
+
   g_urandom = fopen("/dev/urandom", "rb");
   if ( !g_urandom ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open /dev/urandom... Monitor requests may be insecure");
@@ -1041,9 +1475,24 @@ int main(int argc, char *const *argv) {
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Running service " SVC_F " in namespace " NS_F ": path %s",
                g_sid, g_nsid, path);
 
+  if ( g_nsid >= g_ns_uid_count ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "We do not have enough namespace UIDs to map this namespace's root account");
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Only %u namespace UIDs are available", g_ns_uid_count);
+    return 1;
+  } else {
+    g_root_uid = g_ns_uid_lower + g_nsid;
+  }
+
   err = make_process_directory();
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create process directory: %s", strerror(errno));
+    fclose(g_urandom);
+    return 1;
+  }
+
+  stspipe = make_status_pipe();
+  if ( stspipe < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not make status pipe: %s", strerror(errno));
     fclose(g_urandom);
     return 1;
   }
@@ -1101,186 +1550,222 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  /* Execute the service binary */
-  err = exec_service(&ps, &smask, realpath, svargc, svargv);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute service: %s", strerror(errno));
-    /* Monitors will start the service doctor */
-    fclose(g_urandom);
+  /* Daemonize now */
+  daemon_pid = daemonize();
+
+  if ( daemon_pid < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not daemonize process: %s", strerror(errno));
     return 1;
-  }
+  } else if ( daemon_pid > 0 ) {
+    // This is the parent. If there's a wait condition, then wait for it
+    close(stspipe); // We don't need these anymore
+    close(g_socket4);
+    close(g_socket6);
 
-  g_max_socket = g_socket4;
-  if ( g_socket6 > g_max_socket )
-    g_max_socket = g_socket6;
-
-  if ( g_max_socket < 0 )
-    g_max_socket = 0;
-
-  while ( g_state != PROCESS_COMPLETE ) {
-    pid_t werr;
-    int sts, nfds, evs;
-    monitor *pending_hb;
-
-    fd_set rfds, wfds, efds;
-
-    struct timespec timeout, start;
-
-    memset(&timeout, 0, sizeof(timeout));
-
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    FD_ZERO(&efds);
-
-    if ( g_socket4 >= 0 ) {
-      FD_SET(g_socket4, &rfds);
-      FD_SET(g_socket4, &efds);
+    // Restore the signal mask so that this process is interruptible
+    err = sigprocmask(SIG_SETMASK, &smask, 0);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not restore old signal mask");
     }
 
-    if ( g_socket6 >= 0 ) {
-      FD_SET(g_socket6, &rfds);
-      FD_SET(g_socket6, &efds);
+    // TODO perform any waits necessary.
+
+    return 0;
+  } else {
+    /* Execute the service binary */
+    err = exec_service(&ps, &smask, realpath, svargc, svargv);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute service: %s", strerror(errno));
+      /* Monitors will start the service doctor */
+      return 1;
     }
 
-    werr = waitpid(ps, &sts, WNOHANG);
-    if ( werr < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child: %s", strerror(errno));
-      g_state = PROCESS_COMPLETE;
-      break;
-    } else if ( werr > 0 ) {
-      if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 100 ) {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Internal process error: %u", WEXITSTATUS(sts));
+    g_max_socket = g_socket4;
+    if ( g_socket6 > g_max_socket )
+      g_max_socket = g_socket6;
+
+    if ( g_max_socket < 0 )
+      g_max_socket = 0;
+
+    while ( g_state != PROCESS_COMPLETE ) {
+      pid_t werr;
+      int sts, nfds, evs;
+      monitor *pending_hb;
+
+      fd_set rfds, wfds, efds;
+
+      struct timespec timeout, start;
+
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Main loop iteration");
+
+      memset(&timeout, 0, sizeof(timeout));
+
+      FD_ZERO(&rfds);
+      FD_ZERO(&wfds);
+      FD_ZERO(&efds);
+
+      if ( g_socket4 >= 0 ) {
+        FD_SET(g_socket4, &rfds);
+        FD_SET(g_socket4, &efds);
+      }
+
+      if ( g_socket6 >= 0 ) {
+        FD_SET(g_socket6, &rfds);
+        FD_SET(g_socket6, &efds);
+      }
+
+      FD_SET(stspipe, &rfds);
+      FD_SET(stspipe, &efds);
+
+      werr = waitpid(ps, &sts, WNOHANG);
+      if ( werr < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child: %s", strerror(errno));
         g_state = PROCESS_COMPLETE;
-        continue;
-      }
-
-      CLUSTERD_LOG(CLUSTERD_ERROR, "Process has exited: %u", sts);
-
-      if ( g_state == PROCESS_STARTED )
-        process_failure(&ps, sts, &smask);
-      else if ( g_state == PROCESS_FAILURE ) {
-        CLUSTERD_LOG(CLUSTERD_INFO, "Finish script complete");
-        g_state = PROCESS_RECOVERED;
-      } else if ( g_state == PROCESS_DYING ) {
-        g_state = PROCESS_COMPLETE;
-        continue;
-      } else {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Received SIGCHLD from unknown state %d", g_state);
-        g_state = PROCESS_COMPLETE;
-      }
-    }
-
-    // Get next ring. If any monitor is in state send pending, then
-    // add its socket to the write set
-    for ( pending_hb = g_monitors; pending_hb; pending_hb = pending_hb->next ) {
-      if ( pending_hb->state == MONITOR_HEARTBEAT_SEND_PENDING )
-        FD_SET(pending_hb->local_sk, &wfds);
-      else {
-        if ( (timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
-             timespec_cmp(&pending_hb->next_hb, &timeout) < 0 )
-          memcpy(&timeout, &pending_hb->next_hb, sizeof(timeout));
-      }
-    }
-
-    // If we're in the failure or recovering states then add g_next_start to the timer
-    if ( g_state == PROCESS_RECOVERED &&
-         ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
-          timespec_cmp(&g_next_start, &timeout) < 0) ) {
-      memcpy(&timeout, &g_next_start, sizeof(timeout));
-    }
-
-    if ( g_state == PROCESS_DYING &&
-         ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
-          timespec_cmp(&g_next_kill, &timeout) < 0) ) {
-      memcpy(&timeout, &g_next_kill, sizeof(timeout));
-    }
-
-    // Get timeout from next_hb time
-    if ( timeout.tv_sec != 0 || timeout.tv_nsec != 0 ) {
-      err = clock_gettime(CLOCK_MONOTONIC, &start);
-      if ( err < 0 ) {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get start time: %s", strerror(errno));
-      }
-
-      if ( timespec_cmp(&timeout, &start) <= 0 ) {
-        evs = 0;
-        goto process;
-      }
-
-      timespec_sub(&timeout, &start);
-    }
-
-    evs = pselect(g_max_socket, &rfds, &wfds, &efds,
-                  ((timeout.tv_sec != 0 || timeout.tv_nsec != 0) ? &timeout : NULL),
-                  &smask);
-  process:
-    if ( evs < 0 ) {
-      if ( errno != EINTR )
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not select: %s", strerror(errno));
-
-      if ( g_down_signal >= 0 ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Received signal %d", g_down_signal);
-        relay_signal(ps);
-
-        g_down_signal = -1;
-      }
-    } else {
-      struct timespec now;
-
-      err = clock_gettime(CLOCK_MONOTONIC, &now);
-      if ( err < 0 ) {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get time: %s", strerror(errno));
-        return 99;
-      }
-
-      // Send out any pending heartbeats, if possible
-      for ( pending_hb = g_monitors; pending_hb; pending_hb = pending_hb->next ) {
-        if ( pending_hb->state == MONITOR_HEARTBEAT_SEND_PENDING ||
-             timespec_cmp(&now, &pending_hb->next_hb) >= 0 /* check if time has passed */ ) {
-          if ( pending_hb->state == MONITOR_HEARTBEAT_SENT ) {
-            // Failure
-            monitor_failure(pending_hb);
-            pending_hb->state = MONITOR_WAITING;
-          }
-
-          send_monitor_heartbeat(pending_hb);
+        break;
+      } else if ( werr > 0 ) {
+        if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 100 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Internal process error: %u", WEXITSTATUS(sts));
+          g_state = PROCESS_COMPLETE;
+          continue;
         }
-      }
 
-      // Respond to events
-      if ( g_socket4 >= 0 )
-        process_socket(&g_socket4, AF_INET, &rfds, &efds);
+        if ( WIFEXITED(sts) )
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Process has exited: %u", WEXITSTATUS(sts));
+        else if ( WIFSIGNALED(sts) )
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed due to signal %d", WTERMSIG(sts));
+        else
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed because of status: %u", sts);
 
-      if ( g_socket6 >= 0 )
-        process_socket(&g_socket6, AF_INET6, &rfds, &efds);
-
-      // If the state is PROCESS_RECOVERED and g_next_start has passed, start the service again
-      if ( g_state == PROCESS_RECOVERED &&
-           timespec_cmp(&now, &g_next_start) >= 0 ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Cooloff period passed. Restarting service");
-
-        err = exec_service(&ps, &smask, realpath, svargc, svargv);
-        if ( err < 0 ) {
-          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restart service: %s", strerror(errno));
+        if ( g_state == PROCESS_STARTED )
+          process_failure(&ps, sts, &smask);
+        else if ( g_state == PROCESS_FAILURE ) {
+          CLUSTERD_LOG(CLUSTERD_INFO, "Finish script complete");
+          g_state = PROCESS_RECOVERED;
+        } else if ( g_state == PROCESS_DYING ) {
+          g_state = PROCESS_COMPLETE;
+          continue;
+        } else {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Received SIGCHLD from unknown state %d", g_state);
           g_state = PROCESS_COMPLETE;
         }
+      }
 
-        g_state = PROCESS_STARTED;
+      // Get next ring. If any monitor is in state send pending, then
+      // add its socket to the write set
+      for ( pending_hb = g_monitors; pending_hb; pending_hb = pending_hb->next ) {
+        if ( pending_hb->state == MONITOR_HEARTBEAT_SEND_PENDING )
+          FD_SET(pending_hb->local_sk, &wfds);
+        else {
+          if ( (timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
+               timespec_cmp(&pending_hb->next_hb, &timeout) < 0 )
+            memcpy(&timeout, &pending_hb->next_hb, sizeof(timeout));
+        }
+      }
+
+      // If we're in the failure or recovering states then add g_next_start to the timer
+      if ( g_state == PROCESS_RECOVERED &&
+           ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
+            timespec_cmp(&g_next_start, &timeout) < 0) ) {
+        memcpy(&timeout, &g_next_start, sizeof(timeout));
       }
 
       if ( g_state == PROCESS_DYING &&
-           timespec_cmp(&now, &g_next_kill) >= 0 ) {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Process did not die on time. Killing");
-        kill_process(ps);
-        g_state = PROCESS_COMPLETE;
+           ((timeout.tv_sec == 0 && timeout.tv_nsec == 0) ||
+            timespec_cmp(&g_next_kill, &timeout) < 0) ) {
+        memcpy(&timeout, &g_next_kill, sizeof(timeout));
+      }
+
+      // Get timeout from next_hb time
+      if ( timeout.tv_sec != 0 || timeout.tv_nsec != 0 ) {
+        err = clock_gettime(CLOCK_MONOTONIC, &start);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get start time: %s", strerror(errno));
+        }
+
+        if ( timespec_cmp(&timeout, &start) <= 0 ) {
+          evs = 0;
+          goto process;
+        }
+
+        timespec_sub(&timeout, &start);
+      }
+
+      evs = pselect(g_max_socket, &rfds, &wfds, &efds,
+                    ((timeout.tv_sec != 0 || timeout.tv_nsec != 0) ? &timeout : NULL),
+                    &smask);
+    process:
+      if ( evs < 0 ) {
+        if ( errno != EINTR )
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not select: %s", strerror(errno));
+
+        if ( g_down_signal >= 0 ) {
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Received signal %d", g_down_signal);
+          relay_signal(ps);
+
+          g_down_signal = -1;
+        }
+      } else {
+        struct timespec now;
+
+        err = clock_gettime(CLOCK_MONOTONIC, &now);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get time: %s", strerror(errno));
+          return 99;
+        }
+
+        // Send out any pending heartbeats, if possible
+        for ( pending_hb = g_monitors; pending_hb; pending_hb = pending_hb->next ) {
+          if ( pending_hb->state == MONITOR_HEARTBEAT_SEND_PENDING ||
+               timespec_cmp(&now, &pending_hb->next_hb) >= 0 /* check if time has passed */ ) {
+            if ( pending_hb->state == MONITOR_HEARTBEAT_SENT ) {
+              // Failure
+              monitor_failure(pending_hb);
+              pending_hb->state = MONITOR_WAITING;
+            }
+
+            send_monitor_heartbeat(pending_hb);
+          }
+        }
+
+        // Respond to events
+        if ( g_socket4 >= 0 )
+          process_socket(&g_socket4, AF_INET, &rfds, &efds);
+
+        if ( g_socket6 >= 0 )
+          process_socket(&g_socket6, AF_INET6, &rfds, &efds);
+
+        process_command(stspipe, &rfds, &efds);
+
+        // If the state is PROCESS_RECOVERED and g_next_start has passed, start the service again
+        if ( g_state == PROCESS_RECOVERED &&
+             timespec_cmp(&now, &g_next_start) >= 0 ) {
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Cooloff period passed. Restarting service");
+
+          err = exec_service(&ps, &smask, realpath, svargc, svargv);
+          if ( err < 0 ) {
+            CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restart service: %s", strerror(errno));
+            g_state = PROCESS_COMPLETE;
+          }
+
+          g_state = PROCESS_STARTED;
+        }
+
+        if ( g_state == PROCESS_DYING &&
+             timespec_cmp(&now, &g_next_kill) >= 0 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Process did not die on time. Killing");
+          kill_process(ps);
+          g_state = PROCESS_COMPLETE;
+        }
       }
     }
+
+    // TODO need to clean up the process directory and make sure the
+    // child is dead.
+
+    // Process directory can be cleaned up now
+    close(stspipe);
+    clean_process_directory();
   }
-
-  // TODO need to clean up the process directory and make sure the
-  // child is dead.
-
-  // Process directory can be cleaned up now
 
   return 0;
 }
