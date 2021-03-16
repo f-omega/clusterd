@@ -1322,7 +1322,7 @@ int main(int argc, char *const *argv) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not stat data dir %s: %s", g_datadir, strerror(errno));
       return 1;
     }
-  } else if ( peers > 0 ) {
+  } else if ( peers > 0 && needs_bootstrap == 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Peers were given to bootstrap, but this node is already participating in a cluster");
     CLUSTERD_LOG(CLUSTERD_INFO, "Try running without -j");
     return 1;

@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS service
 
   , s_path        TEXT NOT NULL    -- Path to service directory
 
+  , s_runas       INTEGER          -- Unix UID to run this service
+                                   -- as. Can only be set by a cluster
+                                   -- administrator
+
   , CONSTRAINT s_label_unique UNIQUE(s_namespace, s_label)
   , CONSTRAINT s_namespace_fk
       FOREIGN KEY (s_namespace)

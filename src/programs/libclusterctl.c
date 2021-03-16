@@ -51,6 +51,7 @@ static int random_controller_ix(const char *controller, int *countout) {
 
   if ( count == 0 && ctllen == 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "CLUSTERD_CONTROLLER environment variable must contain at least one controller");
+    return -1;
   } else
     count++;
 
