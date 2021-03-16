@@ -126,7 +126,7 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
   i = random() % addrcnt;
   for ( curaddr = addrs, cur = 0;
         cur < i;
-        curaddr = curaddr->ai_next );
+        curaddr = curaddr->ai_next, cur++ );
 
   if ( curaddr->ai_addrlen > sizeof(*ss) ) {
     freeaddrinfo(addrs);
