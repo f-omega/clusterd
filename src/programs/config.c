@@ -90,6 +90,8 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
        (configstat.st_mode & (S_IWGRP | S_IWOTH | S_IXUSR | S_IXGRP | S_IXOTH)) != 0 ) {
 
     if ( S_ISLNK(configstat.st_mode) ) {
+      CLUSTERD_LOG(CLUSTERD_INFO, "system config is a link. checking link stats");
+
       // Make sure the directory is writable only by root
       err = stat(clusterd_get_config_dir(), &configstat);
       if ( err < 0 ) {
@@ -99,6 +101,7 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
 
       if ( configstat.st_uid != 0 ||
            (configstat.st_mode & (S_IWGRP | S_IWOTH) != 0) ) {
+        CLUSTERD_LOG(CLUSTERD_INFO, "perm check fails because configuration directory is writable by groups and other");
         perm_check_failed = 1;
       } else {
         err = stat(configpath, &configstat);
@@ -109,6 +112,7 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
 
         if ( configstat.st_uid != 0 ||
              (configstat.st_mode & (S_IWGRP | S_IWOTH | S_IXGRP | S_IXOTH)) != 0 ) {
+          CLUSTERD_LOG(CLUSTERD_INFO, "system config target is writable by group or others");
           perm_check_failed = 1;
         }
       }
