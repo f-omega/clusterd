@@ -36,7 +36,8 @@ static int clusterd_read_config(FILE *config, config_func_t cmdfunc) {
   int err;
 
   while ( fgets(line, sizeof(line), config) ) {
-    char *cmdend, *valstart;
+    char *cmdend, *valstart, *valend;
+
     if ( strchr(line, '\n') == NULL ) {
       if ( !feof(config) ) {
         CLUSTERD_LOG(CLUSTERD_ERROR, "Line is too long");
@@ -58,6 +59,10 @@ static int clusterd_read_config(FILE *config, config_func_t cmdfunc) {
 
     *cmdend = '\0';
     valstart = cmdend + 1;
+
+    valend = valstart + strlen(valstart) - 1;
+    if ( *valend == '\n' )
+      *valend = '\0';
 
     if ( cmdfunc(line, valstart) < 0 )
       return -1;
