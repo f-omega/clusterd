@@ -101,7 +101,7 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
 
       if ( configstat.st_uid != 0 ||
            (configstat.st_mode & (S_IWGRP | S_IWOTH) != 0) ) {
-        CLUSTERD_LOG(CLUSTERD_INFO, "perm check fails because configuration directory is writable by groups and other");
+        CLUSTERD_LOG(CLUSTERD_INFO, "perm check fails because configuration directory is writable by groups and other: %o", configstat.st_mode);
         perm_check_failed = 1;
       } else {
         err = stat(configpath, &configstat);
