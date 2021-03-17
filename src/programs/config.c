@@ -70,7 +70,7 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
   struct stat configstat;
   char configpath[PATH_MAX];
   FILE *sysconfig;
-  int err;
+  int err, perm_check_failed = 0;
 
   err = snprintf(configpath, sizeof(configpath), "%s/system", clusterd_get_config_dir());
   if ( err >= sizeof(configpath) ) {
@@ -88,6 +88,36 @@ int clusterd_read_system_config(config_func_t cmdfunc) {
 
   if ( configstat.st_uid != 0 ||
        (configstat.st_mode & (S_IWGRP | S_IWOTH | S_IXUSR | S_IXGRP | S_IXOTH)) != 0 ) {
+
+    if ( S_ISLNK(configstat.st_mode) ) {
+      // Make sure the directory is writable only by root
+      err = stat(clusterd_get_config_dir(), &configstat);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not stat() %s: %s", clusterd_get_config_dir(), strerror(errno));
+        return -1;
+      }
+
+      if ( configstat.st_uid != 0 ||
+           (configstat.st_mode & (S_IWGRP | S_IWOTH) != 0) ) {
+        perm_check_failed = 1;
+      } else {
+        err = stat(configpath, &configstat);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Could not stat() %s: %s", configpath, strerror(errno));
+          return -1;
+        }
+
+        if ( configstat.st_uid != 0 ||
+             (configstat.st_mode & (S_IWGRP | S_IWOTH | S_IXGRP | S_IXOTH)) != 0 ) {
+          perm_check_failed = 1;
+        }
+      }
+    } else
+      perm_check_failed = 1;
+  }
+
+
+  if ( perm_check_failed ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "%s must be writable only by root", configpath);
 
     errno = EPERM;
