@@ -177,7 +177,9 @@ int clusterd_parse_group(const char *group, gid_t *gid) {
       return -1;
     }
 
-    return info->gr_gid;
+    *gid = info->gr_gid;
+
+    return 0;
   } else
     return 0;
 }
