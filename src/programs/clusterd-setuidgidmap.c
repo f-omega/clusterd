@@ -46,8 +46,8 @@ int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 static char uid_map[MAP_CAPACITY], gid_map[MAP_CAPACITY];
 static size_t uid_offs = 0, gid_offs = 0;
 
-static uid_t g_ns_uid_lower = 0;
-static unsigned int g_ns_uid_count = 0;
+static uid_t g_sub_uid_lower = 0;
+static unsigned int g_sub_uid_count = 0;
 
 static int write_map(char *buf, size_t *offs, uid_t ns_start, uid_t parent_start, unsigned int count) {
   int err;
@@ -117,23 +117,23 @@ static int set_mappings(const char *pidstr) {
   if ( err < 0 )
     return -1;
 
-  if ( system_user_count > g_ns_uid_count )
-    system_user_count = g_ns_uid_count;
+  if ( system_user_count > g_sub_uid_count )
+    system_user_count = g_sub_uid_count;
 
-  if ( g_ns_uid_count > system_user_count ) {
-    normal_user_count = g_ns_uid_count - system_user_count;
-    normal_user_start = g_ns_uid_lower + system_user_count;
+  if ( g_sub_uid_count > system_user_count ) {
+    normal_user_count = g_sub_uid_count - system_user_count;
+    normal_user_start = g_sub_uid_lower + system_user_count;
   }
 
   if ( system_user_count > 0 ) {
-    err = write_map(uid_map, &uid_offs, SYS_UID_MIN, g_ns_uid_lower, system_user_count);
+    err = write_map(uid_map, &uid_offs, SYS_UID_MIN, g_sub_uid_lower, system_user_count);
     if ( err < 0 )
       return -1;
   }
 
   // Now write as many normal users as possible
   if ( normal_user_count > 0 ) {
-    err = write_map(uid_map, &uid_offs, NORMAL_UID_MIN, g_ns_uid_lower + system_user_count, normal_user_count);
+    err = write_map(uid_map, &uid_offs, NORMAL_UID_MIN, g_sub_uid_lower + system_user_count, normal_user_count);
     if ( err < 0 )
       return -1;
   }
@@ -176,8 +176,8 @@ static void usage() {
 }
 
 static int read_gid_and_uid_ranges(const char *key, const char *value) {
-  if ( strcmp(key, CLUSTERD_CONFIG_NS_UID_RANGE_KEY) == 0 ) {
-    return clusterd_parse_uid_range(value, &g_ns_uid_lower, &g_ns_uid_count);
+  if ( strcmp(key, CLUSTERD_CONFIG_SUB_UID_RANGE_KEY) == 0 ) {
+    return clusterd_parse_uid_range(value, &g_sub_uid_lower, &g_sub_uid_count);
   } else {
     // Typically, we ignore unknown keys
     return 0;
@@ -197,8 +197,8 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  if ( g_ns_uid_lower == 0 ||
-       (g_ns_uid_lower + g_ns_uid_count - 1) <= g_ns_uid_lower ) {
+  if ( g_sub_uid_lower == 0 ||
+       (g_sub_uid_lower + g_sub_uid_count - 1) <= g_sub_uid_lower ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid UID range in system configuration: %s", strerror(errno));
     return 1;
   }

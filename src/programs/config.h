@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #define CLUSTERD_CONFIG_NS_UID_RANGE_KEY "ns_uid_range"
+#define CLUSTERD_CONFIG_SUB_UID_RANGE_KEY "sub_uid_range"
 #define CLUSTERD_CONFIG_GROUP_NAME       "group"
 
 typedef int(*config_func_t)(const char *, const char*);
