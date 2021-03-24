@@ -217,6 +217,8 @@ int clusterctl_open(clusterctl *c) {
   while ( c->attempts < CLUSTERCTL_MAX_ATTEMPTS ) {
     err = clusterctl_connect_random(c);
     if ( err == 0 ) break;
+
+    c->attempts++;
   }
 
   if ( err < 0 ) return err;

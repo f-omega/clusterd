@@ -609,12 +609,6 @@ static int download_image(const char *image, char *realpath, size_t realpathsz) 
      * if it exists */
     setenv("CLUSTERD_IMAGES", CLUSTERD_DEFAULT_IMAGE_PATH, 0);
 
-    err = drop_privileges();
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges in dlimage: %s", strerror(errno));
-      exit(101);
-    }
-
     err = execl(dlimage, "dlimage", image, realpath, NULL);
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute dlimage script: %s", strerror(errno));
     exit(101);
