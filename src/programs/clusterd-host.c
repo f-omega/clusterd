@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include <time.h>
+#include <libgen.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -828,7 +829,7 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     close(stspipe[0]);
 
     strncpy(ns_path, g_ps_path, sizeof(ns_path));
-    basename(ns_path);
+    dirname(ns_path);
 
     setenv("CLUSTERD_NS_DIR", ns_path, 1);
     setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
