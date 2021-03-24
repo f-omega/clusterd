@@ -25,3 +25,4 @@ clusterd-exec
 clusterd-ps
 libclusterctllib.a
 clusterd-setuidgidmap
+clusterd-config
