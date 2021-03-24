@@ -68,7 +68,7 @@ int main(int argc, char *const *argv) {
       g_key_found = 0;
 
       err = clusterd_read_system_config(read_g_key);
-      if ( err < 0 ) {
+      if ( err < 0 || ! g_key_found ) {
         if ( !quiet ) {
           CLUSTERD_LOG(CLUSTERD_ERROR, "Key %s not found", g_key);
           return 1;

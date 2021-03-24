@@ -1685,7 +1685,7 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not download image %s: %s",
                  path, strerror(errno));
     fclose(g_urandom);
-    return 1;
+    goto cleanup_proc;
   }
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Downloaded image to %s", realpath);
@@ -1933,17 +1933,19 @@ int main(int argc, char *const *argv) {
         }
       }
     }
-
-    // Remove process from the controller
-    err = remove_process();
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process from controller. TODO we should wait around until the process can be removed or until another SIGTERM");
-    }
-
     // Process directory can be cleaned up now
     close(stspipe);
     clean_process_directory();
   }
 
   return 0;
+
+ cleanup_proc:
+  // Remove process from the controller
+  err = remove_process();
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process from controller. TODO we should wait around until the process can be removed or until another SIGTERM");
+  }
+
+  return 1;
 }
