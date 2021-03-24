@@ -1730,6 +1730,11 @@ int main(int argc, char *const *argv) {
       return 1;
     }
 
+    err = record_and_reconcile_states();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not record new state");
+    }
+
     g_max_socket = g_socket4;
     if ( g_socket6 > g_max_socket )
       g_max_socket = g_socket6;
