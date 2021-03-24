@@ -23,6 +23,7 @@
 #define CLUSTERD_COMPONENT "clusterd-setuidgidmap"
 #include "clusterd/log.h"
 #include "clusterd/common.h"
+#include "config.h"
 
 #include <locale.h>
 #include <getopt.h>
@@ -30,6 +31,9 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define MAP_CAPACITY (16 * 1024)
 
@@ -37,7 +41,7 @@
 #define SYS_USER_COUNT 600
 #define NORMAL_UID_MIN 1000
 
-static int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
+int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
 static char uid_map[MAP_CAPACITY], gid_map[MAP_CAPACITY];
 static size_t uid_offs = 0, gid_offs = 0;
@@ -60,11 +64,28 @@ static int write_map(char *buf, size_t *offs, uid_t ns_start, uid_t parent_start
   return 0;
 }
 
+static int set_map(const char *procpath, const char *map) {
+  int mapfd, err;
+
+  mapfd = open(procpath, O_RDWR);
+  if ( mapfd < 0 ) {
+    return -1;
+  }
+
+  err = write(mapfd, map, strlen(map));
+  if ( err < 0 ) {
+    close(mapfd);
+    return -1;
+  }
+
+  close(mapfd);
+}
+
 static int set_mappings(const char *pidstr) {
   pid_t childpid, parentpid;
   int err, ret = -1;
   struct stat procstat;
-  char procstatpath[PATH_MAX];
+  char procpath[PATH_MAX];
   char comm[33];
   uid_t normal_user_start = 0;
   unsigned int system_user_count = SYS_USER_COUNT, normal_user_count = 0;
@@ -75,13 +96,13 @@ static int set_mappings(const char *pidstr) {
     return -1;
   }
 
-  err = snprintf(procstatpath, sizeof(procstatpath), "/proc/%d/stat", childpid);
-  if ( err >= sizeof(procstatpath) ) {
+  err = snprintf(procpath, sizeof(procpath), "/proc/%d/stat", childpid);
+  if ( err >= sizeof(procpath) ) {
     errno = ENAMETOOLONG;
     return -1;
   }
 
-  err = stat(procstatpath, &procstat);
+  err = stat(procpath, &procstat);
   if ( err < 0 ) {
     return -1;
   }
@@ -115,6 +136,29 @@ static int set_mappings(const char *pidstr) {
       return -1;
   }
 
+  err = snprintf(procpath, sizeof(procpath), "/proc/%d/gid_map", childpid);
+  if ( err >= sizeof(procpath) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Writing GID Map:\n%s\n",  uid_map);
+
+  err = set_map(procpath, gid_map);
+  if ( err < 0 )
+    return -1;
+
+  err = snprintf(procpath, sizeof(procpath), "/proc/%d/uid_map", childpid);
+  if ( err >= sizeof(procpath) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Writing UID Map:\n%s\n",  uid_map);
+
+  err = set_map(procpath, uid_map);
+  if ( err < 0 )
+    return -1;
+
   ret = 0;
  done:
   return ret;
@@ -129,11 +173,33 @@ static void usage() {
   fprintf(stderr, "Please reports bugs to support@f-omega.com\n");
 }
 
+static int read_gid_and_uid_ranges(const char *key, const char *value) {
+  if ( strcmp(key, CLUSTERD_CONFIG_NS_UID_RANGE_KEY) == 0 ) {
+    return clusterd_parse_uid_range(value, &g_ns_uid_lower, &g_ns_uid_count);
+  } else {
+    // Typically, we ignore unknown keys
+    return 0;
+  }
+}
+
 int main(int argc, char *const *argv) {
   int c, err;
 
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
+
+  /* Read the system configuration */
+  err = clusterd_read_system_config(read_gid_and_uid_ranges);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not parse system configuration: %s", strerror(errno));
+    return 1;
+  }
+
+  if ( g_ns_uid_lower == 0 ||
+       (g_ns_uid_lower + g_ns_uid_count - 1) <= g_ns_uid_lower ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid UID range in system configuration: %s", strerror(errno));
+    return 1;
+  }
 
   while ( (c = getopt(argc, argv, "-vh")) != -1 ) {
     switch ( c ) {
