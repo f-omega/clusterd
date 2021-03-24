@@ -403,6 +403,7 @@ static int check_process_exists() {
 static int make_process_directory() {
   int err;
   struct stat dirstat;
+  char ns_path[PATH_MAX];
 
   err = snprintf(g_ps_path, sizeof(g_ps_path), "%s/proc/" NS_F "/" PID_F,
                  clusterd_get_runtime_dir(), g_nsid, g_pid);
@@ -460,6 +461,15 @@ static int make_process_directory() {
   err = chown(g_ps_path, g_root_uid, g_clusterd_gid);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set process directory owner: %s", strerror(errno));
+    return -1;
+  }
+
+  strncpy(ns_path, g_ps_path, sizeof(ns_path));
+  dirname(ns_path);
+
+  err = chown(ns_path, g_root_uid, g_clusterd_gid);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set namespace directory owner: %s", strerror(errno));
     return -1;
   }
 
