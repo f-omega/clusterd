@@ -323,6 +323,7 @@ static int rm_recursive(DIR *dir) {
         CLUSTERD_LOG(CLUSTERD_ERROR, "Could not remove directory %s: %s", ent->d_name, strerror(errno));
         return -1;
       }
+      break;
 
     case DT_UNKNOWN:
     default:
