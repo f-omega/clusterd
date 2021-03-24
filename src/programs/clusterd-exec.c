@@ -320,13 +320,20 @@ int main(int argc, char *const *argv) {
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "-n:N:l:w:iIvhH")) != -1 ) {
+  while ( (c = getopt(argc, argv, "-n:N:l:w:iIvhHL")) != -1 ) {
     switch ( c ) {
     case 1:
       if ( optarg[0] == '@' ) {
-        if ( !pinnednode )
+        if ( !pinnednode ) {
           pinnednode = optarg + 1;
-        else {
+          if ( strcmp(pinnednode, "local") == 0 ) {
+            // Get the local clusterd hostname
+            pinnednode = clusterd_hostname();
+            if ( !pinnednode ) {
+              CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get local hostname");
+            }
+          }
+        } else {
           CLUSTERD_LOG(CLUSTERD_ERROR, "Only one pinned node can be specified if pinning a process\n");
           usage();
           return 1;

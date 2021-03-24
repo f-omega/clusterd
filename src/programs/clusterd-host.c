@@ -93,7 +93,7 @@ typedef struct monitor {
 
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
-ps_state g_state = PROCESS_PREPARING;
+ps_state g_state = PROCESS_PREPARING, g_recorded_state = PROCESS_PREPARING;
 struct timespec g_next_start;
 struct timespec g_next_kill;
 monitor *g_monitors = NULL;
@@ -133,6 +133,16 @@ const char *get_service_path_lua =
   "clusterd.output(ns_id)\n"
   "clusterd.output(s_id)\n"
   "clusterd.output(svc.s_path)\n";
+
+const char *update_proc_state_lua =
+  "nsid = tonumber(params.namespace)\n"
+  "pid = tonumber(params.pid)\n"
+  "clusterd.update_process(nsid, pid, { state = params.state })\n";
+
+const char *remove_process_lua =
+  "nsid = tonumber(params.namespace)\n"
+  "pid = tonumber(params.pid)\n"
+  "clusterd.delete_process(nsid, pid)\n";
 
 static void usage() {
   fprintf(stderr, "clusterd-host - supervise a clusterd process\n");
@@ -1345,13 +1355,172 @@ static pid_t daemonize() {
   }
 }
 
+static int get_service_info(const char *namespace, const char *service,
+                            clusterd_namespace_t *nsid, clusterd_service_t *sid,
+                            char *path, size_t pathlen) {
+  char s_info[PATH_MAX*3];
+  int err;
+  clusterctl ctl;
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open cluster: %s", strerror(errno));
+    return -1;
+  }
+
+  /* Find details about the requested service, like the image path */
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
+                               get_service_path_lua,
+                               s_info, sizeof(s_info),
+                               "namespace", namespace,
+                               "service", service,
+                               NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT,
+                 "Could not fetch service details: %s", strerror(errno));
+    goto error;
+  }
+
+  // Parse service information
+  err = parse_service_details(s_info, nsid, sid, path, pathlen);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT,
+                 "Invalid service details returned from controller: %s", strerror(errno));
+    goto error;
+  }
+
+  clusterctl_close(&ctl);
+  return 0;
+
+ error:
+  err = errno;
+  clusterctl_close(&ctl);
+  errno = err;
+
+  return -1;
+}
+
+static int remove_process() {
+  clusterctl ctl;
+  int err;
+
+  char nsid_str[32], pid_str[32];
+
+  err = snprintf(nsid_str, sizeof(nsid_str), NS_F, g_nsid);
+  if ( err >= sizeof(nsid_str) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = snprintf(pid_str, sizeof(pid_str), PID_F, g_pid);
+  if ( err >= sizeof(pid_str) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open cluster in remove_process(): %s", strerror(errno));
+    return -1;
+  }
+
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
+                               remove_process_lua,
+                               NULL, 0,
+                               "namespace", nsid_str,
+                               "pid", pid_str,
+                               NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not remove process: %s", strerror(errno));
+    return -1;
+  }
+
+  clusterctl_close(&ctl);
+  return 0;
+
+ error:
+  err = errno;
+  clusterctl_close(&ctl);
+  errno = err;
+
+  return -1;
+}
+
+static int set_process_state(const char *state, ps_state new_recorded_state) {
+  clusterctl ctl;
+  int err;
+
+  char nsid_str[32], pid_str[32];
+
+  err = snprintf(nsid_str, sizeof(nsid_str), NS_F, g_nsid);
+  if ( err >= sizeof(nsid_str) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = snprintf(pid_str, sizeof(pid_str), PID_F, g_pid);
+  if ( err >= sizeof(pid_str) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open cluster for set_process_state(): %s", strerror(errno));
+    return -1;
+  }
+
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
+                               update_proc_state_lua,
+                               NULL, 0,
+                               "namespace", nsid_str,
+                               "pid", pid_str,
+                               "state", state,
+                               NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set process state: %s", strerror(errno));
+    goto error;
+  }
+
+  g_recorded_state = new_recorded_state;
+
+  clusterctl_close(&ctl);
+  return 0;
+
+ error:
+  err = errno;
+  clusterctl_close(&ctl);
+  errno = err;
+
+  return -1;
+}
+
+static int record_and_reconcile_states() {
+  if ( g_state == g_recorded_state ) return 0;
+
+  switch ( g_state ) {
+  case PROCESS_RECOVERED:
+  case PROCESS_PREPARING:
+    return set_process_state("starting", PROCESS_PREPARING);
+
+  case PROCESS_STARTED:
+    return set_process_state("up", PROCESS_STARTED);
+
+  case PROCESS_FAILURE:
+    return set_process_state("down", PROCESS_FAILURE);
+
+    // Don't do anything here
+  case PROCESS_DYING:
+  case PROCESS_COMPLETE:
+    return 0;
+  }
+}
+
 int main(int argc, char *const *argv) {
   int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, stspipe;
   const char *namespace = "default", *service = NULL;
   char realpath[PATH_MAX], path[PATH_MAX], *pidend;
-  char s_info[PATH_MAX*3];
   char *const *svargv;
-  clusterctl ctl;
   pid_t ps, daemon_pid;
   sigset_t smask;
 
@@ -1446,32 +1615,9 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open /dev/urandom... Monitor requests may be insecure");
   }
 
-  err = clusterctl_open(&ctl);
+  err = get_service_info(namespace, service, &g_nsid, &g_sid, path, sizeof(path));
   if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open cluster: %s", strerror(errno));
-    fclose(g_urandom);
-    return 1;
-  }
-
-  /* Find details about the requested service, like the image path */
-  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
-                               get_service_path_lua,
-                               s_info, sizeof(s_info),
-                               "namespace", namespace,
-                               "service", service,
-                               NULL);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT,
-                 "Could not fetch service details: %s", strerror(errno));
-    fclose(g_urandom);
-    return 1;
-  }
-
-  // Parse service information
-  err = parse_service_details(s_info, &g_nsid, &g_sid, path, sizeof(path));
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT,
-                 "Invalid service details returned from controller: %s", strerror(errno));
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fetch service details");
     fclose(g_urandom);
     return 1;
   }
@@ -1760,11 +1906,23 @@ int main(int argc, char *const *argv) {
           kill_process(ps);
           g_state = PROCESS_COMPLETE;
         }
+
+        if ( g_state != g_recorded_state ) {
+          // Attempt to bring the recorded state in line with the current state
+          err = record_and_reconcile_states();
+          if ( err < 0 ) {
+            CLUSTERD_LOG(CLUSTERD_WARNING, "Could not record new state");
+            // TODO wake up after X seconds to attempt to re-record the state
+          }
+        }
       }
     }
 
-    // TODO need to clean up the process directory and make sure the
-    // child is dead.
+    // Remove process from the controller
+    err = remove_process();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process from controller. TODO we should wait around until the process can be removed or until another SIGTERM");
+    }
 
     // Process directory can be cleaned up now
     close(stspipe);

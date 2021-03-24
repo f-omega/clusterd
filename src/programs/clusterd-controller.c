@@ -567,7 +567,7 @@ static void client_leader_redirect(controller_client *client, int provisional_ok
     struct sockaddr_storage ss;
     int err;
 
-    err = clusterd_addr_parse(address, &ss, 1);
+    err = clusterd_addr_parse((char *)address, &ss, 1);
     if ( err < 0 ) {
       client_respond(client, "!unavailable\n");
     } else {
@@ -591,7 +591,7 @@ static void client_leader_redirect(controller_client *client, int provisional_ok
       }
 
       if ( ss.ss_family != AF_UNSPEC ) {
-        clusterd_addr_render(adjaddr, &ss, 1);
+        clusterd_addr_render(adjaddr, (const struct sockaddr *)&ss, 1);
         client_respond(client, "!leader %s %u\n", adjaddr, leader_id);
       }
     }
@@ -1265,7 +1265,7 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  err = add_peer(bindaddrstr, &raft_conf);
+  err = add_peer((char *)bindaddrstr, &raft_conf);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add ourselves as a peer");
     return 1;

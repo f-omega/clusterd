@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 
 #define CLUSTERD_PACKED __attribute__(( packed ))
 
@@ -256,6 +257,27 @@ static inline const char *clusterd_get_config_dir() {
     homedir = "/etc/clusterd";
 
   return homedir;
+}
+
+/**
+ * Get the hostname of this clusterd node
+ */
+static inline const char *clusterd_hostname() {
+  static int got_hostname = 0;
+  static char hostname[HOST_NAME_MAX];
+  const char *name;
+
+  name = getenv("CLUSTERD_HOSTNAME");
+  if ( name ) return name;
+
+  if ( got_hostname ) return hostname;
+
+  if ( gethostname(hostname, sizeof(hostname)) < 0 ) {
+    return NULL;
+  }
+
+  got_hostname = 1;
+  return hostname;
 }
 
 /**

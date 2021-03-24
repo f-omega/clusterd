@@ -706,23 +706,100 @@ function clusterd.list_processes(ns, options)
    return res
 end
 
-function clusterd.update_process(ns, svc, options)
-   assert(ns ~= nil, "namespace required to create or update process")
-   assert(svc ~= nil, "service required to create or update process")
+function clusterd.resolve_process(ns, pid)
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      return nil
+   end
 
+   res, err = api.run(
+      [[SELECT ps_id FROM process
+        WHERE ps_ns = $ns AND ps_id = $pid]],
+      { ns = ns, pid = pid }
+   )
+   if err ~= nil or #res ~= 1 then
+      return nil
+   end
+
+   return res[1].ps_id
+end
+
+function clusterd.get_process(ns, pid)
+   assert(ns ~= nil, "namespace required to create or update process")
+   assert(pid ~= nil, "process ID required to create or update process")
+
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      return nil
+   end
+
+   psid = clusterd.resolve_process(nsid, pid)
+   if psid == nil then
+      return nil
+   end
+
+   res, err = api.run(
+      [[SELECT ps_id, ps_svc, ps_ns, ps_state, ps_placement
+        FROM process WHERE ps_id=$pid AND ps_ns=$ns]],
+      { pid = psid, ns = nsid }
+   )
+   if err ~= nil or #res ~= 1 then
+      return nil
+   end
+
+   return res[1]
+end
+
+function clusterd.delete_process(ns, pid)
+   assert(ns ~= nil, "namespace required to delete namespace")
+   assert(pid ~= nil, "process ID required to delete namespace")
+
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      return nil
+   end
+
+   psid = clusterd.resolve_process(nsid, pid)
+   if psid == nil then
+      return nil
+   end
+
+   _, err = api.run(
+      [[DELETE FROM process WHERE ps_id=$pid AND ps_ns=$ns]],
+      {pid = psid, ns = nsid}
+   )
+   if err ~= nil then
+      error('could not delete process ' .. pid .. ' in namespace ' .. ns .. ': ' .. err)
+   end
+end
+
+function clusterd.update_process(ns, pid, options)
    if options == nil then
       options = {}
    end
 
-   -- If an id is provided, it must exist
-   if options.id ~= nil then
-      lookup_process(ns, svc, options.id)
-      pid = options.id
+   process = clusterd.get_process(ns, pid)
+   if process == nil then
+      error('process ' .. pid .. ' not found in namespace ' .. ns)
    end
 
-   -- We currently do not check that a placement is correct. We need
-   -- to set up some authorization functionality to handle this
-   -- correctly. For now, we just trust the data.
+   if options.state ~= nil then
+      if process.ps_state == 'zombie' and options.state ~= 'zombie' then
+         error('cannot resurrect a zombie process')
+      end
+
+      _, err = api.run(
+         [[UPDATE process
+           SET    ps_state=$state
+           WHERE  ps_id=$pid AND ps_ns=$ns]],
+         { state = options.state, pid = process.ps_id, ns = process.ps_ns }
+      )
+      if err ~= nil then
+         error('could not update process state: ' .. err)
+      end
+   end
+
+   -- TODO need to use authentication or something to set placement
 end
 
 return clusterd
