@@ -442,6 +442,12 @@ static int make_process_directory() {
     return -1;
   }
 
+  err = chown(g_ps_path, g_root_uid, g_clusterd_gid);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set process directory owner: %s", strerror(errno));
+    return -1;
+  }
+
   return 0;
 }
 
