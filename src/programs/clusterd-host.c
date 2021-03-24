@@ -270,6 +270,9 @@ static int rm_recursive(DIR *dir) {
   }
 
   while ( (errno = 0, ent = readdir(dir)) ) {
+    if ( strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0 )
+      continue;
+
     switch ( ent->d_type ) {
     case DT_BLK:
     case DT_CHR:
