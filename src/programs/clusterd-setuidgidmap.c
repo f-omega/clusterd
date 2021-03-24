@@ -79,6 +79,8 @@ static int set_map(const char *procpath, const char *map) {
   }
 
   close(mapfd);
+
+  return 0;
 }
 
 static int set_mappings(const char *pidstr) {
