@@ -1360,11 +1360,13 @@ int main(int argc, char *const *argv) {
 
   raft_set_snapshot_threshold(&raft, 64);
   raft_set_snapshot_trailing(&raft, 16);
+  raft_set_election_timeout(&raft, 200);
   raft_set_pre_vote(&raft, true);
 
   err = raft_start(&raft);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not start raft service: %s", raft_errmsg(&raft));
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Returned error: %s", raft_strerror(err));
     return 1;
   }
 
