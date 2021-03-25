@@ -63,7 +63,6 @@ static int clusterd_tx_ensure_transaction() {
     return -1;
   }
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Allocating %d bytes for tx", err);
   g_transaction.len = err;
   g_transaction.base = raft_malloc(g_transaction.len + 1); // Snprintf truncates its output
   if ( !g_transaction.base ) {
@@ -113,12 +112,10 @@ static void clusterd_tx_add(lua_State *lua, sqlite3_stmt *stmt) {
   }
 
   g_transaction.base = newbase;
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Emitting stmt at offs %d", g_transaction.len);
   memcpy(g_transaction.base + g_transaction.len, sstmt, strlen(sstmt));
   memcpy(g_transaction.base + cmdsz - 2, ";\n", 2);
 
   g_transaction.len = cmdsz;
-  //  CLUSTERD_LOG(CLUSTERD_DEBUG, "Appended stmt %s: %.*s", sstmt, g_transaction.len, g_transaction.base);
 
   sqlite3_free(sstmt);
 }
