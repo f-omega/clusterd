@@ -63,15 +63,16 @@ static int clusterd_tx_ensure_transaction() {
     return -1;
   }
 
-  g_transaction.len = err + 1;
-  g_transaction.base = raft_malloc(g_transaction.len);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Allocating %d bytes for tx", err);
+  g_transaction.len = err;
+  g_transaction.base = raft_malloc(g_transaction.len + 1); // Snprintf truncates its output
   if ( !g_transaction.base ) {
     g_transaction.len = 0;
     errno = ENOMEM;
     return -1;
   }
 
-  snprintf(g_transaction.base, g_transaction.len, "--%u\n", CLUSTERD_TX_VERSION);
+  snprintf(g_transaction.base, g_transaction.len + 1, "--%u\n", CLUSTERD_TX_VERSION);
   return 0;
 }
 
@@ -104,24 +105,20 @@ static void clusterd_tx_add(lua_State *lua, sqlite3_stmt *stmt) {
     luaL_error(lua, "Could not finalize statement");
   }
 
-  cmdsz = snprintf(NULL, 0, "%s%s;\n", (char *)g_transaction.base, sstmt);
-  if ( cmdsz < 0 ) {
-    int serrno = errno;
-    sqlite3_free(sstmt);
-    luaL_error(lua, "Could not add tx entry: %s", strerror(serrno));
-  }
-
-  newbase = raft_realloc(g_transaction.base, cmdsz + 1);
+  cmdsz = g_transaction.len + strlen(sstmt) + 2; // Two extra bytes, one semicolon, one newline
+  newbase = raft_realloc(g_transaction.base, cmdsz);
   if ( !newbase ) {
     sqlite3_free(sstmt);
     luaL_error(lua, "Could not add tx entry: out of memory");
   }
 
   g_transaction.base = newbase;
-  g_transaction.len = cmdsz + 1;
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Emitting stmt at offs %d", g_transaction.len);
+  memcpy(g_transaction.base + g_transaction.len, sstmt, strlen(sstmt));
+  memcpy(g_transaction.base + cmdsz - 2, ";\n", 2);
 
-  strcat(g_transaction.base, sstmt);
-  strcat(g_transaction.base, ";\n");
+  g_transaction.len = cmdsz;
+  //  CLUSTERD_LOG(CLUSTERD_DEBUG, "Appended stmt %s: %.*s", sstmt, g_transaction.len, g_transaction.base);
 
   sqlite3_free(sstmt);
 }
@@ -161,7 +158,7 @@ int clusterd_tx_commit() {
     return 0;
   } else {
 
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "applying transaction to raft");
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "applying transaction to raft: %.*s", (int)g_transaction.len, (char *)g_transaction.base);
     // We only have one application going on at a time. If we're here, the request can be used
     err = raft_apply(lua_tx_raft, &g_raft_apply, &g_transaction, 1, clusterd_tx_apply_complete);
     if ( err != 0 ) {

@@ -228,8 +228,10 @@ static int clusterd_apply(struct raft_fsm *fsm,
   // Find the version string. It should be --%u
   if ( !nl ||
        buf->len <= 2 ||
-       memcmp(buf->base, "--", 2) != 0 )
+       memcmp(buf->base, "--", 2) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Transaction malformed");
     return RAFT_MALFORMED;
+  }
 
   errno = 0;
   version = strtol(buf->base + 2, &end, 10);
@@ -248,6 +250,8 @@ static int clusterd_apply(struct raft_fsm *fsm,
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not apply transaction: %s", errmsg);
     return RAFT_MALFORMED;
   }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Applied successfully");
 
   return 0;
 }
@@ -1356,6 +1360,7 @@ int main(int argc, char *const *argv) {
 
   if ( CLUSTERD_LOG_LEVEL == CLUSTERD_DEBUG ) {
     raft.tracer = &debug_tracer;
+    raft_uv_set_tracer(&io, &debug_tracer);
   }
 
   if ( needs_bootstrap ) {
