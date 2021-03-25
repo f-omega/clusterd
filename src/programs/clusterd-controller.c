@@ -141,6 +141,12 @@ int clusterd_commit(char **errmsg);
 int clusterd_begin(char **errmsg, int writable);
 int clusterd_rollback();
 
+static void trace_raft(struct raft_tracer *a, const char *file, int line, const char *msg) {
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Raft: %s:%d: %s", file, line, msg);
+}
+
+static struct raft_tracer debug_tracer = { NULL, trace_raft };
+
 static int is_valid_sha256(const char *s) {
   int i;
 
@@ -1346,6 +1352,10 @@ int main(int argc, char *const *argv) {
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not initialize raft: %s (%d)", raft_errmsg(&raft), err);
     return 1;
+  }
+
+  if ( CLUSTERD_LOG_LEVEL == CLUSTERD_DEBUG ) {
+    raft.tracer = &debug_tracer;
   }
 
   if ( needs_bootstrap ) {
