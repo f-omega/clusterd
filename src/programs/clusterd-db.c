@@ -147,6 +147,26 @@ static void clusterd_tx_apply_complete(struct raft_apply *req, int status, void 
   clusterd_next_write(status, result);
 }
 
+int clusterd_pad_transaction() {
+  size_t padded, i;
+  char *new_base;
+
+  padded = ((g_transaction.len + 7) / 8) * 8;
+  new_base = raft_realloc(g_transaction.base, padded);
+  if ( !new_base ) {
+    errno = ENOMEM;
+    return -1;
+  }
+
+  for ( i = g_transaction.len; i < padded; ++i )
+    new_base[i] = ' ';
+
+  g_transaction.base = new_base;
+  g_transaction.len = padded;
+
+  return 0;
+}
+
 int clusterd_tx_commit() {
   int entries_to_dismiss, err, i;
 
@@ -155,7 +175,15 @@ int clusterd_tx_commit() {
     return 0;
   } else {
 
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "applying transaction to raft: %.*s", (int)g_transaction.len, (char *)g_transaction.base);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "applying transaction to raft: %.*s (length=%zd)", (int)g_transaction.len, (char *)g_transaction.base, g_transaction.len);
+
+    // Round up to 8 bytes, and pad with spaces
+    err = clusterd_pad_transaction();
+    if ( err < 0 ) {
+      errno = ENOMEM;
+      return -1;
+    }
+
     // We only have one application going on at a time. If we're here, the request can be used
     err = raft_apply(lua_tx_raft, &g_raft_apply, &g_transaction, 1, clusterd_tx_apply_complete);
     if ( err != 0 ) {
