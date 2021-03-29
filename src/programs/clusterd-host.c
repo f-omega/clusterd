@@ -835,6 +835,7 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     return -1;
   } else if ( child == 0 ) {
     char ns_path[PATH_MAX];
+    char idstr[32];
     unsigned char one = 1;
     close(stspipe[0]);
 
@@ -843,6 +844,11 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
 
     setenv("CLUSTERD_NS_DIR", ns_path, 1);
     setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
+
+    snprintf(idstr, sizeof(idstr), NS_F, g_nsid);
+    setenv("CLUSTERD_NAMESPACE", idstr, 1);
+    snprintf(idstr, sizeof(idstr), PID_F, g_pid);
+    setenv("CLUSTERD_PID", idstr, 1);
 
     err = sigprocmask(SIG_SETMASK, oldmask, NULL);
     if ( err < 0 ) {

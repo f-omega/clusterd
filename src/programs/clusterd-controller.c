@@ -19,11 +19,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *
- * TODO:
- *
- * - Currently all requests are processed sequentially.This is okay, and
- *   simplifies things. However, while write requests are outstanding waiting
- *   for quorum, it should be possible to process read-only requests.
  */
 
 #define CLUSTERD_COMPONENT "controller"

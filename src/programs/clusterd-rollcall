@@ -80,9 +80,8 @@ if [ -z ${NODE_HOSTNAME+x} ]; then
 fi
 
 if [ -z ${NODE_ID+x} ]; then
-    MACS=$(ip addr show | grep "link/ether" | awk '{print $2}' | sort | uniq | paste -sd ',')
     CLUSTERD_ID_NS="564c960b-4720-42e4-a738-55d25b155769" # UUID namespace for our node ids
-    NODE_ID=$(uuidgen -n "$CLUSTERD_ID_NS" -N "$MACS" -m)
+    NODE_ID=$(uuidgen -n "$CLUSTERD_ID_NS" -N "$NODE_HOSTNAME" -m)
 fi
 
 collect_resources() {
