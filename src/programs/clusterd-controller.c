@@ -334,7 +334,7 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
     return RAFT_CORRUPT;
   }
 
-  bufs = NULL;
+  *bufs = NULL;
 
   for (;;) {
     ssize_t bytes;
