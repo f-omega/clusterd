@@ -312,7 +312,7 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
   unsigned int buf_capacity = 0;
   size_t total_sz = 0;
 
-
+  *bufs = NULL;
   *n_bufs = 0;
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Debug. Snapshotting");
