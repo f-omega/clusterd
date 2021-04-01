@@ -275,7 +275,11 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
     if ( next_capacity == 0 )
       next_capacity = 4;
 
-    next_bufs = raft_realloc(bufs, sizeof(struct raft_buffer) * next_capacity);
+    if ( bufs )
+      next_bufs = raft_realloc(bufs, sizeof(struct raft_buffer) * next_capacity);
+    else
+      next_bufs = raft_malloc(sizeof(struct raft_buffer) * next_capacity);
+
     if ( !next_bufs ) return NULL;
 
     *capacity = next_capacity;
