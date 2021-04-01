@@ -70,3 +70,6 @@ target_link_libraries(clusterd-ps clusterctllib)
 add_executable(clusterd-setuidgidmap src/programs/clusterd-setuidgidmap.c src/programs/config.c)
 
 add_executable(clusterd-config src/programs/clusterd-config.c src/programs/config.c)
+
+add_executable(clusterd-resource src/programs/clusterd-resource.c)
+target_link_libraries(clusterd-resource clusterctllib)

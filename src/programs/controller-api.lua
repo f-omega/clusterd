@@ -35,6 +35,26 @@ function clusterd.system_status()
    end
 end
 
+function hexval(c)
+   d = string.byte(c)
+   if d >= 0x30 and d<0x3A then
+      return d - 0x30
+   elseif d >= 0x41 and d <= 0x46 then
+      return (d - 0x41) + 10
+   end
+end
+
+function clusterd.dehex(s)
+   out = ""
+   for i=0,(#s/2)-1 do
+      local h = string.sub(s, i * 2 + 1, i * 2 + 1)
+      local l = string.sub(s, i * 2 + 2, i * 2 + 2)
+
+      out = out .. string.char(hexval(h) * 16 + hexval(l))
+   end
+   return out
+end
+
 ------------------------------------------
 -- Failure Domains                      --
 ------------------------------------------
@@ -800,6 +820,412 @@ function clusterd.update_process(ns, pid, options)
    end
 
    -- TODO need to use authentication or something to set placement
+end
+
+------------------------------------------
+-- Global resources                     --
+------------------------------------------
+
+global_resource_projection =
+   [[gr_ns AS ns, gr_name AS name, gr_management_process AS management_process,
+     gr_metadata AS metadata, gr_type AS "type", gr_description AS description,
+     gr_persistent AS persistent, gr_available AS available ]]
+
+function clusterd.list_global_resources(options)
+   conditions = {}
+
+   if options.namespace ~= nil then
+      ns = clusterd.resolve_namespace(options.namespace)
+      if ns == nil then
+         error('namespace ' .. options.namespace .. ' not found')
+      end
+
+      options.namespace = ns
+
+      table.insert(conditions, "gr_ns=$namespace")
+   end
+
+   if #conditions > 0 then
+      condition = [[ WHERE ]] .. table.concat(conditions, " AND ")
+   else
+      condition = ""
+   end
+
+   res, err = api.run([[SELECT ]] .. global_resource_projection ..
+                      [[ FROM global_resource]] .. condition, options)
+   if err ~= nil then
+      error('could not list resources: ' .. err)
+   end
+
+   return res
+end
+
+function clusterd.get_global_resource(ns, name)
+   assert(ns ~= nil, "namespace required to get global resource")
+   assert(name ~= nil, "name required to get global resource")
+
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      error('namespace ' .. ns .. ' not found')
+   end
+
+   rows, err = api.run(
+      [[SELECT ]] .. global_resource_projection ..
+      [[FROM global_resource
+        WHERE gr_ns = $ns AND gr_name = $name]],
+      {ns = nsid, name = name}
+   )
+   if err ~= nil then
+      error('could not select from global_resource: ' .. err)
+   end
+
+   if #rows ~= 1 then
+      return nil
+   end
+
+   res = rows[1]
+   status, meta = pcall(function() return json.decode(res.metadata) end)
+   if status then
+      res.metadata = meta
+   else
+      res.bad_metadata = res.metadata
+      res.metadata = {}
+   end
+
+   return res
+end
+
+function clusterd.new_global_resource(nsid, name, options)
+   assert(nsid ~= nil, "namespace required to create global resources")
+   assert(name ~= nil, "name required to create global resources")
+
+   if options == nil then
+      options = {}
+   end
+
+   assert(options.process ~= nil, "management process required to create a global resource")
+   assert(options.type ~= nil, "resource type required to create a global resource")
+
+   ns = clusterd.resolve_namespace(nsid)
+   if ns == nil then
+      error("namespace " .. nsid .. " not found")
+   end
+
+   mgmt_proc = clusterd.resolve_process(ns, options.process)
+   if mgmt_proc == nil then
+      error("process " .. options.process .. " in namespace " .. nsid .. " not found")
+   end
+
+   row = {
+      name = name,
+      ns = ns,
+      management_process = mgmt_proc,
+      type = options.type,
+      description = options.description
+   }
+
+   if options.persistent ~= nil then
+      row.persistent = options.persistent
+   else
+      row.persistent = false
+   end
+
+   if options.available ~= nil then
+      row.available = options.available
+   else
+      row.available = false
+   end
+
+   if options.metadata == nil then
+      options.metadata = {}
+   end
+   row.metadata = json.encode(options.metadata)
+
+   _, err = api.run(
+      [[INSERT INTO global_resource(gr_ns, gr_name, gr_management_process, gr_metadata,
+                                    gr_type, gr_description, gr_persistent, gr_available)
+        VALUES ($ns, $name, $management_process, $metadata, $type,
+                $description, $persistent, $available)]],
+      row
+   )
+   if err ~= nil then
+      error('could not create global resource: ' .. err)
+   end
+
+   return name
+end
+
+function clusterd.delete_global_resource(ns, name)
+   assert(ns ~= nil, "namespace required to delete global resource")
+   assert(name ~= nil, "name required to delete global resource")
+
+   resource = clusterd.get_global_resource(ns, name)
+   if resource == nil then
+      return
+   end
+
+   _, err = api.run(
+      [[DELETE FROM global_resource WHERE gr_ns=$ns AND gr_name=$name]],
+      {ns = resource.ns, name = resource.name}
+   )
+   if err ~= nil then
+      error('could not delete global resource: ' .. err)
+   end
+end
+
+function clusterd.update_global_resource(ns, name, options)
+   assert(ns ~= nil, "namespace required to update global resource")
+   assert(name ~= nil, "name required to update global resource")
+
+   if options == nil then
+      options = {}
+   end
+
+   assert(options.service == nil or options.force, "cannot update a global resource service once set, unless force given")
+   assert(options.type == nil, "cannot update a global resource type")
+   assert(options.persistent == nil, "cannot update resource persistence after creation")
+
+   resource = clusterd.get_global_resource(ns, name)
+   if resource == nil then
+      error("global resource " .. name .. " in namespace " .. ns .. " not found")
+   end
+
+   updates = {}
+
+   if options.description ~= nil and options.description ~= resource.description then
+      updates.gr_description = options.description
+   end
+
+   if options.process ~= nil then
+      service = clusterd.resolve_process(ns, options.process)
+      if service == nil then
+         error('process ' .. options.process .. ' in namespace ' .. ns .. ' not found')
+      end
+
+      updates.gr_management_process = process
+   end
+
+   if options.available ~= nil then
+      updates.gr_available = options.available
+      if not options.available and resource.available then
+         -- If a resource is going to be made unavailabl, then it should have no assignments
+         res, err = api.run(
+            [[SELECT COUNT(*) AS count FROM global_resource_assignment
+              WHERE gra_ns=$ns AND gra_resource=$resource]],
+            { ns = resource.ns, resource = resource.name }
+         )
+         if err ~= nil or #res ~= 1 then
+            error('cannot check resource assignments')
+         end
+
+         if res[1].count > 0 then
+            error("cannot make resource unavailable, because it's assigned to " .. res[1].count .. " node(s)")
+         end
+      end
+   end
+
+   if options.metadata ~= nil then
+      updates.gr_metadata = json.encode(options.metadata)
+   end
+
+   cols = {}
+   for col, val in pairs(updates) do
+      table.insert(cols, col .. '=$' .. col)
+   end
+
+   if #cols > 0 then
+      query = [[UPDATE global_resource SET ]] .. table.concat(cols, ",") ..
+         [[ WHERE gr_ns=$ns AND gr_name=$name ]]
+      clusterd.output(query)
+
+      updates.ns = resource.ns
+      updates.name = resource.name
+
+      _, err = api.run(query, updates)
+      if err ~= nil then
+         error('could not update global resource: ' .. err)
+      end
+   end
+end
+
+------------------------------------------
+-- Global resource assignments          --
+------------------------------------------
+
+function clusterd.get_global_resource_assignments(ns, name)
+   assert(ns ~= nil, 'namespace required to get resource assignments')
+   assert(name ~= nil, 'name required to get resource assignments')
+
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      error('namespace ' .. ns .. ' not found')
+   end
+
+   rows, err = api.run(
+      [[SELECT gra_ns AS ns, gra_resource AS resource, gra_node AS node,
+               gra_rel AS rel, gra_description AS description,
+               gra_metadata AS metadata,
+               gra_enforce_affinity AS enforce_affinity
+        FROM global_resource_assignment
+        WHERE gra_ns = $ns AND gra_resource = $name]],
+      { ns = nsid, name = name }
+   )
+   if err ~= nil then
+      error('could not get global resource assignments for ' .. name .. ' in namespace ' .. ns ..
+               ': ' .. err)
+   end
+
+   for _, row in ipairs(rows) do
+      status, metadata = pcall(function() return json.decode(row.metadata) end)
+      if status then
+         row.metadata = metadata
+      else
+         row.bad_metadata = row.metadata
+         row.metadata = nil
+      end
+   end
+
+   return rows
+end
+
+function clusterd.assign_global_resource(ns, name, node, opts)
+   assert(ns ~= nil, 'namespace required to assign a global resource')
+   assert(name ~= nil, 'resource name required to assign a global resource')
+   assert(node ~= nil, 'node required to assign a global resource')
+
+   if opts == nil then
+      opts = {}
+   end
+
+   nodeid = clusterd.resolve_node(node)
+   if nodeid == nil then
+      error('node ' .. node .. ' not found')
+   end
+
+   nsid = clusterd.resolve_namespace(ns)
+   if nsid == nil then
+      error('namespace ' .. ns .. ' not found')
+   end
+
+   if opts.unassign then
+      _, err = api.run(
+         [[DELETE FROM global_resource_assignment
+           WHERE gra_ns=$ns AND gra_resource=$name AND gra_node=$node AND gra_rel=COALESCE($rel, gra_rel)]],
+         {ns = nsid, name = name, node = nodeid, rel = opts.rel}
+      )
+      if err ~= nil then
+         error('could not unassign resource ' .. name .. ' in namespace ' .. ns .. ': ' .. err)
+      end
+   else
+      resource = clusterd.get_global_resource(ns, name)
+      if resource == nil then
+         error('resource ' .. name .. ' in namespace ' .. ns .. ' not found')
+      end
+
+      if not resource.available then
+         error('resource ' .. name .. ' in namespace ' .. ns .. ' is not available')
+      end
+
+      metadata = opts.metadata
+      if metadata == nil then
+         metadata = {}
+      end
+
+      _, err = api.run(
+         [[INSERT INTO global_resource_assignment
+            (gra_ns, gra_resource, gra_node, gra_rel,
+             gra_description, gra_metadata, gra_enforce_affinity)
+           VALUES ($ns, $resource, $node, COALESCE($rel, 'default'),
+                   $description, $metadata, COALESCE($enforce_affinity, FALSE))
+           ON CONFLICT (gra_ns, gra_resource, gra_rel)
+           DO UPDATE SET gra_rel=COALESCE($rel, gra_rel),
+                         gra_description=COALESCE($description, gra_description),
+                         gra_metadata=$metadata,
+                         gra_enforce_affinity=COALESCE($enforce_affinity, gra_enforce_affinity)]],
+         {ns = nsid, resource = name, node = nodeid,
+          rel = opts.rel, description = opts.description, enforce_affinity = opts.enforce_affinity,
+          metadata = json.encode(metadata) }
+      )
+      if err ~= nil then
+         error('could not assign resource ' .. name .. ' in namespace ' .. ns .. ' to node ' .. node .. ': ' ..
+               err)
+      end
+   end
+end
+------------------------------------------
+-- Resource claims                      --
+------------------------------------------
+
+function clusterd.claim_resource(ns, name, pid)
+   assert(ns ~= nil, 'namespace must be provided to claim resource')
+   assert(name ~= nil, 'name must be provided to claim resource')
+   assert(pid ~= nil, 'process id must be provided to claim resource')
+
+   resource = clusterd.get_global_resource(ns, name)
+   if resource == nil then
+      assert('resource ' .. name .. ' in namespace ' .. ns .. ' not found')
+   end
+
+   proc = clusterd.get_process(resource.ns, pid)
+   if proc == nil then
+      assert('process ' .. pid .. ' in namespace ' .. ns .. ' not found')
+   end
+
+   -- If this resource has any assignment that limit it to a certain
+   -- node, then make sure this process is assigned to that
+   -- node. Otherwise, disallow the operation
+
+   nodes, err = api.run(
+      [[SELECT DISTINCT gra_node FROM global_resource_assignment
+        WHERE gra_ns=$ns AND gra_resource=$name AND gra_enforce_affinity]],
+      { ns=resource.ns, name=resource.name }
+   )
+   if err ~= nil then
+      error('could not get resource assignments: ' .. err)
+   end
+
+   if #nodes > 1 then
+      error('this resource is assigned to many nodes with different affinities')
+   end
+
+   if proc.ps_placement ~= nodes[1].gra_node then
+      error('process ' .. proc.ps_id .. ' cannot claim this resource. ' ..
+               'The resource requires processes to be on node ' .. nodes[1].gra_node .. ', ' ..
+               'but the process is placed on ' .. proc.ps_placement)
+   end
+
+   _, err = api.run(
+      [[REPLACE INTO global_resource_claim(grc_ns, grc_resource, grc_process)
+        VALUES ($ns, $name, $proc)]],
+      { ns = resource.ns, name = resource.name, proc = proc }
+   )
+   if err ~= nil then
+      error('could not claim resource: ' .. err)
+   end
+end
+
+function clusterd.release_claim(ns, name, pid)
+   assert(ns ~= nil, 'namespace must be provided to release resource claim')
+   assert(name ~= nil, 'name must be provided to release resource claim')
+
+   resource = clusterd.get_global_resource(ns, name)
+   if resource == nil then
+      return
+   end
+
+   proc = clusterd.resolve_process(resource.ns, pid)
+   if proc == nil then
+      return
+   end
+
+   _, err = api.run(
+      [[DELETE FROM global_resource_claim WHERE grc_ns=$ns AND
+        grc_resource=$name AND grc_process=$proc]],
+      { ns = resource.ns, name = resource.name, proc = proc }
+   )
+   if err ~= nil then
+      error('could not release resource claim: ' .. err)
+   end
 end
 
 return clusterd

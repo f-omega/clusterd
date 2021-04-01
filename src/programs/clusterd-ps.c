@@ -20,7 +20,7 @@
  * SOFTWARE.
  */
 
-#define CLUSTERD_COMPONENT "controller"
+#define CLUSTERD_COMPONENT "ps"
 #include "clusterd/log.h"
 #include "clusterd/common.h"
 #include "libclusterctl.h"

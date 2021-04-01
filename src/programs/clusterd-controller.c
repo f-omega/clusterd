@@ -116,6 +116,8 @@ char *g_datadir = NULL;
 lua_State *g_lua = NULL;
 sqlite3 *g_database = NULL;
 
+static char g_dbfile[PATH_MAX];
+
 static const char final_comment[] = "-- CONTROL END\n";
 extern const char rc_json_lua[];
 
@@ -251,14 +253,119 @@ static int clusterd_apply(struct raft_fsm *fsm,
   return 0;
 }
 
+static void free_buffers(struct raft_buffer *bufs[], unsigned int nbufs) {
+  unsigned int i;
+
+  for ( i = 0; i < nbufs; ++i ) {
+    struct raft_buffer *buf = *bufs + i;
+    free(buf->base);
+  }
+
+  free(*bufs);
+}
+
+static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs[],
+                                     unsigned int *capacity, unsigned int *nbufs) {
+  struct raft_buffer *buf = NULL;
+
+  if ( *capacity <= *nbufs ) {
+    struct raft_buffer *next_bufs;
+    unsigned int next_capacity = *capacity * 2;
+
+    if ( next_capacity == 0 )
+      next_capacity = 4;
+
+    next_bufs = raft_realloc(bufs, sizeof(struct raft_buffer) * next_capacity);
+    if ( !next_bufs ) return NULL;
+
+    *capacity = next_capacity;
+    *bufs = next_bufs;
+  }
+
+  // Now we certainly have enough space
+  buf = *bufs + *nbufs;
+
+  buf->len = nextbufsz;
+  buf->base = raft_malloc(nextbufsz);
+  if ( !buf->base )
+    return NULL;
+
+  // Add the buffer to the end of the list
+  *nbufs ++;
+  return buf;
+}
+
 static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], unsigned *n_bufs) {
+  int err, ret = 0, dbfd;
+  unsigned int buf_capacity = 0;
+  size_t total_sz = 0;
+
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Debug. Snapshotting");
-  return -1;
+
+  err = clusterd_snapshot_database(g_dbfile);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not snapshot database: %s", strerror(errno));
+    return RAFT_CORRUPT;
+  }
+
+  dbfd = open(g_dbfile, O_RDONLY);
+  if ( dbfd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read database file: %s", strerror(errno));
+    return RAFT_CORRUPT;
+  }
+
+  bufs = NULL;
+
+  for (;;) {
+    ssize_t bytes;
+    char buf[1024 * 16];
+
+    bytes = read(dbfd, buf, sizeof(buf));
+    if ( bytes == 0 ) {
+      // End of file
+      break;
+    } else if ( bytes < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read database file: %s", strerror(errno));
+      ret = RAFT_CORRUPT;
+
+      goto error;
+    } else {
+      struct raft_buffer *next_buf = alloc_buf(bytes, bufs, &buf_capacity, n_bufs);
+      if ( !next_buf ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not allocate buffer space. Out of memory");
+        ret = RAFT_NOMEM;
+        goto error;
+      }
+
+      total_sz += bytes;
+      memcpy(next_buf->base, buf, bytes);
+    }
+  }
+
+  close(dbfd);
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Snapshotted %zd bytes", total_sz);
+
+  return ret;
+
+ error:
+  free_buffers(bufs, *n_bufs);
+  *n_bufs = 0;
+  return ret;
 }
 
 static int clusterd_restore(struct raft_fsm *fsm, struct raft_buffer *buf) {
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Restoring");
-  return -1;
+  int err;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Restoring snapshot of size %zd", buf->len);
+
+  err = clusterd_restore_snapshot(g_dbfile, buf->base, buf->len);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restore snapshot: %s", strerror(errno));
+    return RAFT_CORRUPT;
+  }
+
+  return 0;
 }
 
 static void client_alloc_buffer(uv_handle_t *handle, size_t suggested, uv_buf_t *buf) {
@@ -1159,16 +1266,15 @@ static int start_lua() {
 }
 
 static int open_database() {
-  char dbfile[PATH_MAX];
   int err;
 
-  err = snprintf(dbfile, sizeof(dbfile), "%s/clusterd.db", g_datadir);
-  if ( err >= sizeof(dbfile) ) {
+  err = snprintf(g_dbfile, sizeof(g_dbfile), "%s/clusterd.db", g_datadir);
+  if ( err >= sizeof(g_dbfile) ) {
     errno = ENAMETOOLONG;
     return -1;
   }
 
-  g_database = clusterd_open_database(dbfile);
+  g_database = clusterd_open_database(g_dbfile);
   if ( !g_database ) return -1;
 
   return 0;

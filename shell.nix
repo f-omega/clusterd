@@ -5,5 +5,5 @@ with pkgs;
 stdenv.mkDerivation {
   name = "clusterd";
 
-  buildInputs = [ cmake libuv pkg-config ronn raft-canonical lua5_3 gdb valgrind sqlite debianutils shadow ];
+  buildInputs = [ cmake libuv pkg-config ronn raft-canonical lua5_3 gdb valgrind sqlite debianutils shadow jq ];
 }

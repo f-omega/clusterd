@@ -36,7 +36,7 @@ Note that `-v`, `-D` and `-A` must come before any namespace names.
 ## ENVIRONMENT
 
 * `CLUSTERD_CONTROLLER`:
-   A comma-separated list of all controllers on this clusterd(7) configuration
+   A comma-separated list of all controllers in this clusterd(7) configuration
 
 ## EXAMPLES
 
@@ -66,4 +66,4 @@ Copyright (c) 2021 F Omega Enterprises LLC
 
 ## SEE ALSO
 
-clusterd(7), clusterd-controller(1), clusterd-launch(1)
+clusterd(7), clusterd-controller(1), clusterd-exec(1)

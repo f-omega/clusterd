@@ -134,13 +134,83 @@ BEGIN
       AND NEW.n_state='down';
 END;
 
-CREATE TABLE IF NOT EXISTS script
-  ( scr_id TEXT PRIMARY KEY
-  , scr_source TEXT NOT NULL
+-- Global resources are things that exist globally in the cluster, in
+-- some namespace, and on some set of nodes.
+
+CREATE TABLE IF NOT EXISTS global_resource
+  ( gr_ns INTEGER NOT NULL
+
+  , gr_name       TEXT NOT NULL
+  , gr_management_process INTEGER NOT NULL
+
+  -- JSON description of this resource
+  , gr_metadata   TEXT NOT NULL
+  -- Some representation of the type of this resource
+  , gr_type       TEXT NOT NULL
+
+  -- Human readable description of the resource
+  , gr_description TEXT
+
+  -- If true, then the global resource should automatically be deleted
+  -- when no more processes are using it
+  , gr_persistent BOOLEAN NOT NULL
+
+  -- If true, then the global resource is available for
+  -- use. Otherwise, attempting to attach it to a process will fail.
+  , gr_available BOOLEAN NOT NULL
+
+  , PRIMARY KEY (gr_ns, gr_name)
+  , CONSTRAINT gr_namespace_fk
+      FOREIGN KEY (gr_ns)
+      REFERENCES namespace(ns_id)
+      ON DELETE RESTRICT
+  , CONSTRAINT gr_management_process_fk
+      FOREIGN KEY (gr_ns, gr_management_process)
+      REFERENCES process(ps_ns, ps_id)
+      ON DELETE RESTRICT
   );
 
-CREATE TABLE IF NOT EXISTS extension
-  ( ext_id       TEXT PRIMARY KEY
-  , ext_version  INTEGER NOT NULL
-  , ext_src_path TEXT NOT NULL
+-- This table maps global resources to the nodes that host them
+CREATE TABLE IF NOT EXISTS global_resource_assignment
+  ( gra_ns INTEGER NOT NULL
+  , gra_resource  TEXT NOT NULL
+  , gra_node      TEXT NOT NULL
+
+  , gra_rel       TEXT NOT NULL
+  , gra_description TEXT -- Human readable version of rel
+  , gra_metadata  TEXT NOT NULL -- JSON representation of any metadat
+
+  -- If true, then any process that needs to use this resource, will
+  -- have to be scheduled on this node
+  , gra_enforce_affinity BOOLEAN NOT NULL
+
+  , PRIMARY KEY (gra_ns, gra_resource, gra_rel)
+  , CONSTRAINT gra_namespace_fk
+      FOREIGN KEY (gra_ns)
+      REFERENCES namespace(ns_id)
+      ON DELETE RESTRICT
+  , CONSTRAINT gra_resource_fk
+      FOREIGN KEY (gra_ns, gra_resource)
+      REFERENCES global_resource(gr_ns, gr_name)
+      ON DELETE CASCADE
+  , CONSTRAINT gra_node_fk
+      FOREIGN KEY (gra_node)
+      REFERENCES node(n_id)
+      ON DELETE RESTRICT
+  );
+
+-- This makes sure that at most one node is set as the one with affinity
+CREATE UNIQUE INDEX IF NOT EXISTS global_resource_assignment_affinity
+  ON global_resource_assignment (gra_ns, gra_resource)
+  WHERE gra_enforce_affinity;
+
+CREATE TABLE IF NOT EXISTS global_resource_claim
+  ( grc_ns INTEGER NOT NULL
+  , grc_resource TEXT NOT NULL
+  , grc_process  INTEGER NOT NULL
+
+  , CONSTRAINT gra_process_fk
+      FOREIGN KEY (grc_ns, grc_process)
+      REFERENCES process(ps_ns, ps_id)
+      ON DELETE CASCADE
   );

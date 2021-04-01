@@ -1,0 +1,37 @@
+<!-- -*- mode: markdown -*- -->
+
+clusterd-ps(1) -- clusterd process viewer
+============================================
+
+## SYNOPSIS
+
+`clusterd-ps` -vhc [-n NAMESPACE | -A]
+
+## DESCRIPTION
+
+`clusterd-ps` lists the processes started in a clusterd cluster.
+
+## OPTIONS
+
+* `-c`:
+  Do not return stale results.
+* `-A`:
+  Display processes from all namespaces. By default, only processes in
+  the default namespace are shown.
+* `-n` <NAMESPACE>:
+  Only show processes in the given namespace.
+* `-v`:
+  Display verbose debug output
+
+## ENVIRONMENT
+
+* `CLUSTERD_CONTROLLER`:
+  A comma-separated list of all controllers in this clusterd(7) configuration
+
+## COPYRIGHT
+
+Copyright (c) 2021 F Omega Enterprises LLC
+
+## SEE ALSO
+
+clusterd(7), clusterd-exec(1)

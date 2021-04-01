@@ -6,7 +6,7 @@ clusterd-exec(7) -- execute a clusterd service
 ## SYNOPSIS
 
 `clusterd-exec` -vhiI [-w COND] [-n NAMESPACE] [-N RESTARTS] [-l LIMIT]
-    [-f PATH | SERVICEID] ARGS...
+    [-f PATH | SERVICEID] [@machine] ARGS...
 
 ## DESCRIPTION
 
@@ -66,7 +66,11 @@ resource constraints with the `-l` flag.
   Display verbose debugging output
 
 Any positional arguments after the `-f` or `-s` flags are interpreted
-as arguments to be passed to the service process.
+as arguments to be passed to the service process. If the first
+argument begins with an `@` sign, then it is interpreted to be the
+name of a clusterd(7) node that the service should execute on. This
+bypasses the normal scheduling process, and ignores any resource
+limits.
 
 ## ENVIRONENT
 

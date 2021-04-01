@@ -28,6 +28,9 @@
 #include <lauxlib.h>
 #include <raft.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 extern int CLUSTERD_LOG_LEVEL;
 extern const char rc_controller_schema_sql[];
@@ -209,18 +212,10 @@ static int db_schema_cb(void *ud, int ncols, char **vals, char **cols) {
   return SQLITE_OK;
 }
 
-sqlite3 *clusterd_open_database(const char *path) {
+static sqlite3 *clusterd_do_open(const char *path) {
   sqlite3 *db;
   char *errmsg;
   int err, had_rows = 0;
-
-  // If the path already exists, delete it. We trust raft to restore from snapshot
-  err = unlink(path);
-  if ( err < 0 ) {
-    if ( errno != ENOENT ) {
-      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not unlink %s: %s", path, strerror(errno));
-    }
-  }
 
   err = sqlite3_open(path, &db);
   if ( err != SQLITE_OK ) {
@@ -262,6 +257,159 @@ sqlite3 *clusterd_open_database(const char *path) {
   }
 
   return db;
+}
+
+
+sqlite3 *clusterd_open_database(const char *path) {
+  int err;
+
+  // If the path already exists, delete it. We trust raft to restore from snapshot
+  err = unlink(path);
+  if ( err < 0 ) {
+    if ( errno != ENOENT ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not unlink %s: %s", path, strerror(errno));
+    }
+  }
+
+  return clusterd_do_open(path);
+}
+
+static int do_vacuum(const char *backup_path) {
+  char query_buf[PATH_MAX * 2];
+  int err, had_rows = 0;
+  char *errmsg = NULL;
+
+  err = snprintf(query_buf, sizeof(query_buf),
+                 "VACUUM INTO %s;", backup_path);
+  if ( err >= sizeof(query_buf) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = sqlite3_exec(g_database, query_buf, db_schema_cb, (void *)&had_rows, &errmsg);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "could not vacuum database: %s", errmsg);
+    sqlite3_free(errmsg);
+    return -1;
+  } else if ( had_rows ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "VACUUM INTO statement contained %d rows", had_rows);
+  }
+
+  return 0;
+}
+
+int clusterd_snapshot_database(const char *main_path) {
+  int err;
+  char backup_path[PATH_MAX];
+
+  err = snprintf(backup_path, sizeof(backup_path), "%s.snap", main_path);
+  if ( err >= sizeof(backup_path) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = access(backup_path, R_OK | W_OK);
+  if ( err < 0 && errno != ENOENT ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot snapshot database. Can't access backup file: %s", strerror(errno));
+    return -1;
+  } else if ( err == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Found existing snapshot at %s. Removing", backup_path);
+
+    err = unlink(backup_path);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not remove database at %s: %s", backup_path, strerror(errno));
+      return -1;
+    }
+  }
+
+  // Issue vacuum into command
+  err = do_vacuum(backup_path);
+  if ( err < 0 )
+    return -1;
+
+  // Now close the original database, rename the backup_path to
+  // main_path, and then re-open the database at main_path.
+  err = sqlite3_close(g_database);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not close sqlite database: %s", sqlite3_errstr(err));
+
+    errno = EBUSY;
+    return -1;
+  }
+
+  g_database = NULL;
+
+  err = rename(backup_path, main_path);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not rename backup to new path");
+    return -1;
+  }
+
+  // Now re-open the database
+  g_database = clusterd_do_open(main_path);
+  if ( !g_database )
+    return -1;
+
+  return 0;
+}
+
+int clusterd_restore_snapshot(const char *file, void *base, size_t len) {
+  char restore_file[PATH_MAX];
+  int err, fd;
+
+  err = snprintf(restore_file, sizeof(restore_file), "%s.restore", file);
+  if ( err >= sizeof(restore_file) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  fd = open(restore_file, O_RDWR | O_CREAT | O_TRUNC, S_IWUSR | S_IRUSR);
+  if ( fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open restore file %s: %s", restore_file, strerror(errno));
+    return -1;
+  }
+
+  err = ftruncate(fd, len);
+  if ( err < 0 ) {
+    int serrno = errno;
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not truncate file %s to %zd: %s",
+                 restore_file, len, strerror(errno));
+    close(fd);
+    errno = serrno;
+    return -1;
+  }
+
+  err = pwrite(fd, base, len, 0);
+  if ( err < 0 ) {
+    int serrno = errno;
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not write snapshot file %s: %s", restore_file, strerror(errno));
+    errno = serrno;
+    return -1;
+  }
+
+  close(fd);
+
+  err = sqlite3_close(g_database);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not close database during restore: %s", sqlite3_errstr(err));
+
+    errno = EBUSY;
+    return -1;
+  }
+
+  g_database = NULL;
+
+  err = rename(restore_file, file);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restore file to main database during move: %s", strerror(errno));
+    return -1;
+  }
+
+  g_database = clusterd_do_open(file);
+  if ( !g_database )
+    return -1;
+
+  return 0;
 }
 
 static void sqlite3_lua_error(lua_State *lua, char *error, const char *what) {
