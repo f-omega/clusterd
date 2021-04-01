@@ -286,6 +286,8 @@ static int do_vacuum(const char *backup_path) {
     return -1;
   }
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Vacuuming: %s", query_buf);
+
   err = sqlite3_exec(g_database, query_buf, db_schema_cb, (void *)&had_rows, &errmsg);
   if ( err != SQLITE_OK ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "could not vacuum database: %s", errmsg);
@@ -294,6 +296,8 @@ static int do_vacuum(const char *backup_path) {
   } else if ( had_rows ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "VACUUM INTO statement contained %d rows", had_rows);
   }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Vacuumed");
 
   return 0;
 }
@@ -307,6 +311,8 @@ int clusterd_snapshot_database(const char *main_path) {
     errno = ENAMETOOLONG;
     return -1;
   }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Snapshotting to %s", backup_path);
 
   err = access(backup_path, R_OK | W_OK);
   if ( err < 0 && errno != ENOENT ) {
@@ -322,10 +328,14 @@ int clusterd_snapshot_database(const char *main_path) {
     }
   }
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Goign to vacuum");
+
   // Issue vacuum into command
   err = do_vacuum(backup_path);
   if ( err < 0 )
     return -1;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Re-opening database");
 
   // Now close the original database, rename the backup_path to
   // main_path, and then re-open the database at main_path.
@@ -344,6 +354,9 @@ int clusterd_snapshot_database(const char *main_path) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not rename backup to new path");
     return -1;
   }
+
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Going to reset g_database");
 
   // Now re-open the database
   g_database = clusterd_do_open(main_path);
