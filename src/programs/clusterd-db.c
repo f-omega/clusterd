@@ -280,7 +280,7 @@ static int do_vacuum(const char *backup_path) {
   char *errmsg = NULL;
 
   err = snprintf(query_buf, sizeof(query_buf),
-                 "VACUUM INTO %s;", backup_path);
+                 "VACUUM INTO '%s';", backup_path);
   if ( err >= sizeof(query_buf) ) {
     errno = ENAMETOOLONG;
     return -1;
