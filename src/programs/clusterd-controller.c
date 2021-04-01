@@ -311,6 +311,8 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
     return RAFT_CORRUPT;
   }
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Snapshotted database");
+
   dbfd = open(g_dbfile, O_RDONLY);
   if ( dbfd < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read database file: %s", strerror(errno));
@@ -333,7 +335,11 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
 
       goto error;
     } else {
-      struct raft_buffer *next_buf = alloc_buf(bytes, bufs, &buf_capacity, n_bufs);
+      struct raft_buffer *next_buf;
+
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Read %zd bytes", bytes);
+
+      next_buf = alloc_buf(bytes, bufs, &buf_capacity, n_bufs);
       if ( !next_buf ) {
         CLUSTERD_LOG(CLUSTERD_CRIT, "Could not allocate buffer space. Out of memory");
         ret = RAFT_NOMEM;
