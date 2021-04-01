@@ -268,12 +268,16 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
                                      unsigned int *capacity, unsigned int *nbufs) {
   struct raft_buffer *buf = NULL;
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Capacity %u, size %u", *capacity, *nbufs);
+
   if ( *capacity <= *nbufs ) {
     struct raft_buffer *next_bufs;
     unsigned int next_capacity = *capacity * 2;
 
     if ( next_capacity == 0 )
       next_capacity = 4;
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Next capacity %u", next_capacity);
 
     if ( bufs )
       next_bufs = raft_realloc(bufs, sizeof(struct raft_buffer) * next_capacity);
@@ -282,12 +286,15 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
 
     if ( !next_bufs ) return NULL;
 
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Next bufs %p", next_bufs);
     *capacity = next_capacity;
     *bufs = next_bufs;
   }
 
   // Now we certainly have enough space
   buf = *bufs + *nbufs;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Next buf %p", buf);
 
   buf->len = nextbufsz;
   buf->base = raft_malloc(nextbufsz);
@@ -296,6 +303,7 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
 
   // Add the buffer to the end of the list
   *nbufs ++;
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got %u bufs", *nbufs);
   return buf;
 }
 
