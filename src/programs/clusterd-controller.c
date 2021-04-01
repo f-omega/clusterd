@@ -277,7 +277,7 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
     if ( next_capacity == 0 )
       next_capacity = 4;
 
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Next capacity %u", next_capacity);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Next capacity %u, bufs %p", next_capacity, *bufs);
 
     if ( *bufs )
       next_bufs = raft_realloc(*bufs, sizeof(struct raft_buffer) * next_capacity);
@@ -287,6 +287,7 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer *bufs
     if ( !next_bufs ) return NULL;
 
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Next bufs %p", next_bufs);
+
     *capacity = next_capacity;
     *bufs = next_bufs;
   }
