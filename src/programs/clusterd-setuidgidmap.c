@@ -117,12 +117,8 @@ static int set_mappings(const char *pidstr) {
   if ( err < 0 )
     return -1;
 
-  // Map nogroup and nobody at uid and gid 65534
+  // Map nogroup at gid 65534
   err = write_map(gid_map, &gid_offs, 65534, 65534, 1);
-  if ( err < 0 )
-    return -1;
-
-  err = write_map(uid_map, &uid_offs, 65534, 65534, 1);
   if ( err < 0 )
     return -1;
 
