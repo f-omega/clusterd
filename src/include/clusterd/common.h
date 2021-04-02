@@ -267,10 +267,18 @@ static inline const char *clusterd_hostname() {
   static char hostname[HOST_NAME_MAX];
   const char *name;
 
-  name = getenv("CLUSTERD_HOSTNAME");
-  if ( name ) return name;
-
   if ( got_hostname ) return hostname;
+
+  name = getenv("CLUSTERD_HOSTNAME");
+  if ( name ) {
+    if ( strlen(name) >= sizeof(hostname) ) {
+      return NULL;
+    }
+
+    got_hostname = 1;
+    strcpy(hostname, name);
+    return hostname;
+  }
 
   if ( gethostname(hostname, sizeof(hostname)) < 0 ) {
     return NULL;

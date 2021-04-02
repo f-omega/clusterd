@@ -118,6 +118,15 @@ uid_t             g_root_uid = 0;
 
 gid_t          g_clusterd_gid = 0;
 
+int            g_service_out = -1;
+int            g_service_in  = -1;
+
+// Where the clusterd-host stderr and stdout get written to. Usually /dev/null unless requested otherwise
+int            g_hostlog_fd = -1;
+int            g_hosterr_fd = -1;
+
+const char    *g_clusterd_hostname = NULL;
+
 unsigned int g_ping_interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 FILE *g_urandom = NULL;
 
@@ -147,20 +156,22 @@ const char *remove_process_lua =
 
 static void usage() {
   fprintf(stderr, "clusterd-host - supervise a clusterd process\n");
-  fprintf(stderr, "Usage: clusterd-host -vh [-n NAMESPACE] [-m MONITOR...] -p PID -i INTERVAL\n");
+  fprintf(stderr, "Usage: clusterd-host -vhdi [-n NAMESPACE] [-m MONITOR...] -p PID -I INTERVAL\n");
   fprintf(stderr, "         SERVICEID args...\n\n");
   fprintf(stderr, "   -n NAMESPACE   Execute the service in the given namespace.\n");
   fprintf(stderr, "                  If not specified, defaults to the default namespace.\n");
   fprintf(stderr, "   -m MONITOR     Specify one or more monitor nodes. If none\n");
   fprintf(stderr, "                  specified, the service will not be restarted\n");
   fprintf(stderr, "                  if this node fails\n");
-  fprintf(stderr, "   -i INTERVAL    How often (in seconds) to send a monitor request\n");
+  fprintf(stderr, "   -I INTERVAL    How often (in seconds) to send a monitor request\n");
   fprintf(stderr, "   -p PID         Clusterd process ID for this host\n");
+  fprintf(stderr, "   -i             Run in interactive mode\n");
+  fprintf(stderr, "   -d             Run in debug mode and print logs to a file (default: discard)\n");
   fprintf(stderr, "   -v             Display verbose debug output\n");
   fprintf(stderr, "   -h             Show this help menu\n");
   fprintf(stderr, "   SERVICEID      The name or ID of the service to start\n\n");
   fprintf(stderr, "All arguments after the service ID are passed directly to the service run script\n\n");
-  fprintf(stderr, "Please reports bugs to support@f-omega.com\n");
+  fprintf(stderr, "Please report bugs to support@f-omega.com\n");
 }
 
 static int parse_service_details(char *info, clusterd_namespace_t *ns, clusterd_service_t *svc,
@@ -398,6 +409,115 @@ static int check_process_exists() {
     close(cmdpipe);
     return 1;
   }
+}
+
+static int setup_interactive_logs() {
+  g_hostlog_fd = dup(STDOUT_FILENO);
+  if ( g_hostlog_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not save interactive fd: %s", strerror(errno));
+    return -1;
+  }
+
+  g_hosterr_fd = dup(STDERR_FILENO);
+  if ( g_hosterr_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not save interactive fd: %s", strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
+static int setup_logs() {
+  int err;
+  char host_log_path[PATH_MAX];
+  const char *runtime_dir;
+
+  runtime_dir = clusterd_get_runtime_dir();
+
+  err = snprintf(host_log_path, sizeof(host_log_path),
+                 "%s/log", runtime_dir);
+  if ( err >= sizeof(host_log_path) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = mkdir_recursive(host_log_path);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create log dir: %s", strerror(errno));
+    return -1;
+  }
+
+  err = snprintf(host_log_path, sizeof(host_log_path),
+                 "%s/log/" NS_F "-" PID_F "-%ld.log",
+                 runtime_dir, g_nsid, g_pid, time(NULL));
+  if ( err >= sizeof(host_log_path) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  g_hostlog_fd = open(host_log_path, O_WRONLY | O_CREAT | O_TRUNC,
+                      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+  if ( g_hostlog_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open host log: %s", strerror(errno));
+    return -1;
+  }
+
+  g_hosterr_fd = dup(g_hostlog_fd);
+  if ( g_hosterr_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not setup logging stderr: %s", strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
+static int discard_logs() {
+  g_hostlog_fd = open("/dev/null", O_WRONLY);
+  if ( g_hostlog_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open /dev/null for host log: %s", strerror(errno));
+    return -1;
+  }
+
+  g_hosterr_fd = dup(g_hostlog_fd);
+  if ( g_hosterr_fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not dup /dev/null: %s", strerror(errno));
+  }
+
+  return 0;
+}
+
+static int open_service_logs() {
+  char log_path[PATH_MAX];
+  int err;
+
+  // If the logging service exists, then we create a pipe, otherwise set g_service_out to dev nul
+  err = snprintf(log_path, sizeof(log_path), "%s/image/log/run", clusterd_get_runtime_dir());
+  if ( err >= sizeof(log_path) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = access(log_path, X_OK);
+  if ( err < 0 && errno != ENOENT ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not access log script");
+    return -1;
+  } else if ( err < 0 && errno == ENOENT ) {
+    // Log script not found, open /dev/null
+
+    g_service_out = open("/dev/null", O_WRONLY);
+    if ( g_service_out < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open /dev/null for service output");
+      return -1;
+    }
+  } else {
+    // Open a pipe for logging
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Piping is net yet implemented");
+
+    errno = EPIPE;
+    return -1;
+  }
+
+  return 0;
 }
 
 static int make_process_directory() {
@@ -809,6 +929,37 @@ static int start_monitoring() {
   return 0;
 }
 
+static void setup_service_logging() {
+  int err;
+
+  // STDIN is inherited as usual, but STDOUT and STDERR are likely
+  // redirected to a logger output (/dev/null or an actual
+  // file). Either way, they need to be redirected to g_service_out.
+
+  err = dup2(STDOUT_FILENO, g_service_out);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set up service logging: %s", strerror(errno));
+  }
+
+  err = dup2(STDERR_FILENO, g_service_out);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set up service logging: %s", strerror(errno));
+  }
+}
+
+static void close_fds() {
+  close(g_socket4);
+  close(g_socket6);
+  if ( g_hostlog_fd > 0 )
+    close(g_hostlog_fd);
+  if ( g_hosterr_fd > 0 )
+    close(g_hosterr_fd);
+  if ( g_service_out > 0 )
+    close(g_service_out);
+  if ( g_service_in > 0 )
+    close(g_service_in);
+}
+
 static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, char *const *svargv) {
   char servicerun[PATH_MAX];
   int err, stspipe[2];
@@ -842,6 +993,9 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     strncpy(ns_path, g_ps_path, sizeof(ns_path));
     dirname(ns_path);
 
+    // TODO determine if we really need this. We probably need to keep some clusterd_ variables around
+    clearenv();
+
     setenv("CLUSTERD_NS_DIR", ns_path, 1);
     setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
 
@@ -849,6 +1003,8 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     setenv("CLUSTERD_NAMESPACE", idstr, 1);
     snprintf(idstr, sizeof(idstr), PID_F, g_pid);
     setenv("CLUSTERD_PID", idstr, 1);
+
+    setenv("CLUSTERD_HOST", g_clusterd_hostname, 1);
 
     err = sigprocmask(SIG_SETMASK, oldmask, NULL);
     if ( err < 0 ) {
@@ -870,9 +1026,8 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
       exit(100);
     }
 
-    /* Close sockets */
-    close(g_socket4);
-    close(g_socket6);
+    setup_service_logging();
+    close_fds();
 
     err = execl(servicerun, "start", NULL);
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not start service process %s: %s", servicerun, strerror(errno));
@@ -1017,6 +1172,9 @@ static void process_failure(pid_t *ps, int sts, sigset_t *oldmask) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges: %s", strerror(errno));
       goto send_errno;
     }
+
+    setup_service_logging();
+    close_fds();
 
     execl(finish_path, "finish", exitcodestr, signalstr, NULL);
 
@@ -1276,6 +1434,40 @@ static int read_gid_and_uid_ranges(const char *key, const char *value) {
   }
 }
 
+static int setup_host_logs() {
+  int fd;
+
+  close(STDIN_FILENO);
+
+  // stdin should be redirected to read from /dev/null
+  // stdout and stderr should be redirected to g_ps_path/host.log
+  fd = open("/dev/null", O_RDONLY);
+  if ( fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open /dev/null for STDIN: %s", strerror(errno));
+    return -1;
+  }
+
+  if ( fd != STDIN_FILENO ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "open /dev/null did not return stdin");
+    return -1;
+  }
+
+  fd = dup2(STDOUT_FILENO, g_hostlog_fd);
+  if ( fd < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could dup host log to stdout: %s", strerror(errno));
+    return -1;
+  }
+
+  fd = dup2(STDERR_FILENO, g_hosterr_fd);
+  if ( fd < 0 ) {
+    // Use printf because stderr may be dead
+    printf("Could not dup host log to stderr: %s", strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
 static pid_t daemonize() {
   pid_t child, sessid, grandchild;
   int stspipe[2], err;
@@ -1311,7 +1503,8 @@ static pid_t daemonize() {
 
     if ( grandchild == 0 ) {
       close(stspipe[1]);
-      return 0; // We are the grandchild
+
+      return setup_host_logs();
     }
 
     errno = 0;
@@ -1534,7 +1727,7 @@ static int record_and_reconcile_states() {
 }
 
 int main(int argc, char *const *argv) {
-  int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, stspipe;
+  int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, wants_logs = 0, interactive = 0, stspipe;
   const char *namespace = "default", *service = NULL;
   char realpath[PATH_MAX], path[PATH_MAX], *pidend;
   char *const *svargv;
@@ -1544,7 +1737,7 @@ int main(int argc, char *const *argv) {
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "-n:m:p:vh")) != -1 ) {
+  while ( (c = getopt(argc, argv, "-n:m:p:vhdi")) != -1 ) {
     switch ( c ) {
     case 1:
       firstarg = optind - 1;
@@ -1576,6 +1769,14 @@ int main(int argc, char *const *argv) {
       }
       break;
 
+    case 'i':
+      interactive = 1;
+      break;
+
+    case 'd':
+      wants_logs = 1;
+      break;
+
     case 'v':
       CLUSTERD_LOG_LEVEL = CLUSTERD_DEBUG;
       break;
@@ -1600,6 +1801,12 @@ int main(int argc, char *const *argv) {
   if ( firstarg < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Service name or ID must be provided on command line");
     usage();
+    return 1;
+  }
+
+  g_clusterd_hostname = clusterd_hostname();
+  if ( !g_clusterd_hostname ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get hostname: %s", strerror(errno));
     return 1;
   }
 
@@ -1636,7 +1843,7 @@ int main(int argc, char *const *argv) {
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fetch service details");
     fclose(g_urandom);
-    return 1;
+    goto cleanup_proc;
   }
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Running service " SVC_F " in namespace " NS_F ": path %s",
@@ -1645,7 +1852,7 @@ int main(int argc, char *const *argv) {
   if ( g_nsid >= g_ns_uid_count ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "We do not have enough namespace UIDs to map this namespace's root account");
     CLUSTERD_LOG(CLUSTERD_CRIT, "Only %u namespace UIDs are available", g_ns_uid_count);
-    return 1;
+    goto cleanup_proc;
   } else {
     g_root_uid = g_ns_uid_lower + g_nsid;
   }
@@ -1654,14 +1861,44 @@ int main(int argc, char *const *argv) {
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create process directory: %s", strerror(errno));
     fclose(g_urandom);
-    return 1;
+    goto cleanup_proc;
+  }
+
+  if ( interactive ) {
+    err = setup_interactive_logs();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set up interaction: %s", strerror(errno));
+      fclose(g_urandom);
+      goto cleanup_proc;
+    }
+  } else if ( wants_logs ) {
+    err = setup_logs();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set up host logging: %s", strerror(errno));
+      fclose(g_urandom);
+      goto cleanup_proc;
+    }
+  } else {
+    err = discard_logs();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not discard logs: %s", strerror(errno));
+      fclose(g_urandom);
+      goto cleanup_proc;
+    }
+  }
+
+  err = open_service_logs();
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "");
+    fclose(g_urandom);
+    goto cleanup_proc;
   }
 
   stspipe = make_status_pipe();
   if ( stspipe < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not make status pipe: %s", strerror(errno));
     fclose(g_urandom);
-    return 1;
+    goto cleanup_proc;
   }
 
   /* Steps to run the process:
@@ -1708,13 +1945,13 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not contact monitors: %s", strerror(errno));
     start_process_doctor();
     fclose(g_urandom);
-    return 1;
+    goto cleanup_proc;
   }
 
   err = setup_signals(&smask);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set up signal mask for execution: %s", strerror(errno));
-    return 1;
+    goto cleanup_proc;
   }
 
   /* Daemonize now */
@@ -1722,7 +1959,7 @@ int main(int argc, char *const *argv) {
 
   if ( daemon_pid < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not daemonize process: %s", strerror(errno));
-    return 1;
+    goto cleanup_proc;
   } else if ( daemon_pid > 0 ) {
     // This is the parent. If there's a wait condition, then wait for it
     close(stspipe); // We don't need these anymore

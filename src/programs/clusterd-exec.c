@@ -85,6 +85,7 @@ static void usage() {
   fprintf(stderr, "                 Request additional resources, overriding requirements from\n");
   fprintf(stderr, "                 the controller\n");
   fprintf(stderr, "   -w CONDITION  Wait for the service to reach some state before exiting\n");
+  fprintf(stderr, "   -d            Run the host process in debug mode (logs output to a logging directory)");
   fprintf(stderr, "   -i            Redirect the stdout of the process onto the current terminal\n");
   fprintf(stderr, "   -I            Redirect both stdin and stdout of the process to the current terminal\n");
   fprintf(stderr, "   -v            Show verbose debugging output\n");
@@ -188,7 +189,7 @@ clusterd_exec_wait parse_wait_condition(const char *c) {
 
 static int launch_service(clusterctl *ctl, const char *nodeaddr,
                           const char *namespace, const char *service, clusterd_pid_t pid,
-                          int argc, char *const *argv) {
+                          int keep_logs, int argc, char *const *argv) {
   const char **new_argv, *cmd;
   char ourname[HOST_NAME_MAX + 1], pidstr[32];
   int err, argind = 0, sts[2];
@@ -229,6 +230,9 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
 
   if ( CLUSTERD_LOG_LEVEL == CLUSTERD_DEBUG )
     new_argv[argind++] = "-v";
+
+  if ( keep_logs )
+    new_argv[argind++] = "-d";
 
   new_argv[argind++] = "-p";
   new_argv[argind++] = pidstr;
@@ -308,7 +312,7 @@ int main(int argc, char *const *argv) {
   const char *namespace = "default", *service = NULL, *pinnednode = NULL,
     *nodeaddr = NULL;
   char *end;
-  int retries, firstarg = -1, redirect_stdout = 0, redirect_stdin = 0, err;
+  int retries, firstarg = -1, redirect_stdout = 0, redirect_stdin = 0, keep_logs = 0, err;
   clusterd_exec_wait wait_condition = CLUSTERD_EXEC_NO_WAIT;
   clusterd_exec_availability availability = CLUSTERD_LOCAL_AVAILABILITY;
 
@@ -320,7 +324,7 @@ int main(int argc, char *const *argv) {
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "-n:N:l:w:iIvhHL")) != -1 ) {
+  while ( (c = getopt(argc, argv, "-n:N:l:w:iIvhHLd")) != -1 ) {
     switch ( c ) {
     case 1:
       if ( optarg[0] == '@' ) {
@@ -367,6 +371,10 @@ int main(int argc, char *const *argv) {
       availability = CLUSTERD_HIGH_AVAILABILITY;
       break;
 
+    case 'd':
+      keep_logs = 1;
+      break;
+
     case 'w':
       wait_condition = parse_wait_condition(optarg);
       if ( wait_condition == CLUSTERD_EXEC_WAIT_INVALID ) {
@@ -386,6 +394,10 @@ int main(int argc, char *const *argv) {
     case 'v':
       CLUSTERD_LOG_LEVEL = CLUSTERD_DEBUG;
       break;
+
+    case 'h':
+      usage();
+      return 0;
 
     default:
       usage();
@@ -468,7 +480,8 @@ int main(int argc, char *const *argv) {
 
   if ( firstarg < 0 ) firstarg = argc;
 
-  err = launch_service(&ctl, nodeaddr, namespace, service, pid,  argc - firstarg, argv + firstarg);
+  err = launch_service(&ctl, nodeaddr, namespace, service, pid,
+                       keep_logs, argc - firstarg, argv + firstarg);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not launch service: %s", strerror(errno));
     goto cleanup;
