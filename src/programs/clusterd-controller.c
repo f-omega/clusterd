@@ -268,18 +268,12 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer **buf
                                      unsigned int *capacity, unsigned int *nbufs) {
   struct raft_buffer *buf = NULL;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Capacity %u, size %u", *capacity, *nbufs);
-
   if ( *capacity <= *nbufs ) {
     struct raft_buffer *next_bufs;
     unsigned int next_capacity = *capacity * 2;
 
     if ( next_capacity == 0 )
       next_capacity = 4;
-
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Next capacity %u", next_capacity);
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "bufs=%p", bufs);
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "*bufs=%p", *bufs);
 
     if ( *bufs )
       next_bufs = raft_realloc(*bufs, sizeof(struct raft_buffer) * next_capacity);
@@ -297,7 +291,6 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer **buf
   // Now we certainly have enough space
   buf = *bufs + *nbufs;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Next buf %p", buf);
 
   buf->len = nextbufsz;
   buf->base = raft_malloc(nextbufsz);
@@ -306,7 +299,6 @@ static struct raft_buffer *alloc_buf(ssize_t nextbufsz, struct raft_buffer **buf
 
   // Add the buffer to the end of the list
   *nbufs ++;
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got %u bufs", *nbufs);
   return buf;
 }
 
@@ -318,15 +310,11 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
   *bufs = NULL;
   *n_bufs = 0;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Debug. Snapshotting");
-
   err = clusterd_snapshot_database(g_dbfile);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not snapshot database: %s", strerror(errno));
     return RAFT_CORRUPT;
   }
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Snapshotted database");
 
   dbfd = open(g_dbfile, O_RDONLY);
   if ( dbfd < 0 ) {
@@ -351,8 +339,6 @@ static int clusterd_snapshot(struct raft_fsm *fsm, struct raft_buffer *bufs[], u
       goto error;
     } else {
       struct raft_buffer *next_buf;
-
-      CLUSTERD_LOG(CLUSTERD_DEBUG, "Read %zd bytes", bytes);
 
       next_buf = alloc_buf(bytes, bufs, &buf_capacity, n_bufs);
       if ( !next_buf ) {
