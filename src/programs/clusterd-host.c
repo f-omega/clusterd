@@ -948,7 +948,7 @@ static void process_failure(pid_t *ps, int sts, sigset_t *oldmask) {
     exit(101); // TODO
   }
 
-  err = snprintf(finish_path, sizeof(finish_path), "%s/finish", g_ps_path);
+  err = snprintf(finish_path, sizeof(finish_path), "%s/image/finish", g_ps_path);
   if ( err >= sizeof(finish_path) ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Not enough space for finish command");
     return;
