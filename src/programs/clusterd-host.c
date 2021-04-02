@@ -1439,6 +1439,8 @@ static int setup_host_logs() {
 
   close(STDIN_FILENO);
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Setting up host logs");
+
   // stdin should be redirected to read from /dev/null
   // stdout and stderr should be redirected to g_ps_path/host.log
   fd = open("/dev/null", O_RDONLY);
