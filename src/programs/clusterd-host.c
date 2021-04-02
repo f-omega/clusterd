@@ -994,7 +994,7 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     dirname(ns_path);
 
     // TODO determine if we really need this. We probably need to keep some clusterd_ variables around
-    clearenv();
+    //clearenv();
 
     setenv("CLUSTERD_NS_DIR", ns_path, 1);
     setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
