@@ -936,12 +936,12 @@ static void setup_service_logging() {
   // redirected to a logger output (/dev/null or an actual
   // file). Either way, they need to be redirected to g_service_out.
 
-  err = dup2(STDOUT_FILENO, g_service_out);
+  err = dup2(g_service_out, STDOUT_FILENO);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set up service logging: %s", strerror(errno));
   }
 
-  err = dup2(STDERR_FILENO, g_service_out);
+  err = dup2(g_service_out, STDERR_FILENO);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set up service logging: %s", strerror(errno));
   }
@@ -1454,13 +1454,13 @@ static int setup_host_logs() {
     return -1;
   }
 
-  fd = dup2(STDOUT_FILENO, g_hostlog_fd);
+  fd = dup2(g_hostlog_fd, STDOUT_FILENO);
   if ( fd < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could dup host log to stdout: %s", strerror(errno));
     return -1;
   }
 
-  fd = dup2(STDERR_FILENO, g_hosterr_fd);
+  fd = dup2(g_hosterr_fd, STDERR_FILENO);
   if ( fd < 0 ) {
     // Use printf because stderr may be dead
     printf("Could not dup host log to stderr: %s", strerror(errno));
