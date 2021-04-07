@@ -24,6 +24,7 @@ usage() {
     echo "   -i NODEID       Override the default node ID selection"
     echo "   -H HOSTNAME     Override the default hostname selection"
     echo "   -A ADDRESS      Override the default IP selection"
+    echo "   -N FILE         Write the node number out to the given file"
     echo "   -v              Enable verbose debug output"
     echo "   -h              Print this help menu"
     echo
@@ -35,6 +36,8 @@ usage() {
     echo
     echo "Please report bugs to support@f-omega.com"
 }
+
+NODENUMBER_FILE=
 
 while (($#)); do
     case $1 in
@@ -55,6 +58,11 @@ while (($#)); do
             ;;
         -A)
             NODE_ADDRESS=$2
+            shift
+            ;;
+
+        -N)
+            NODENUMBER_FILE=$2
             shift
             ;;
     esac
@@ -101,7 +109,13 @@ clusterd.update_node("${NODE_ID}", {
   resources={
     $(collect_resources)
   }})
+node = clusterd.get_node("${NODE_ID}")
+clusterd.output(node.number)
 EOF
 }
 
-make_node_update | ${CLUSTERD_BIN}clusterctl -w
+make_node_update | ${CLUSTERD_BIN}clusterctl -w | read -r NODENUMBER
+
+if [ ! -z ${NODENUMBER_FILE+x} ]; then
+    echo -n $NODENUMBER > $NODENUMBER_FILE
+fi

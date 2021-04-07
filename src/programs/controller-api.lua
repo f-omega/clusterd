@@ -266,14 +266,12 @@ function clusterd.delete_node(node_id)
 end
 
 function clusterd.list_nodes()
-   res, err = api.run([[SELECT n_id, n_hostname, n_ip FROM node]])
+   res, err = api.run([[SELECT ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node]])
    if err ~= nil then
       error("Could not get nodes: " .. err)
-   else
-      for _, row in ipairs(res) do
-         output(node_to_json(row))
-      end
    end
+
+   return res
 end
 
 function clusterd.get_node(nid)
