@@ -276,7 +276,7 @@ end
 
 function clusterd.get_node(nid)
    res, err = api.run(
-      [[SELECT n_id, n_hostname, n_ip FROM node WHERE n_id=$id]],
+      [[SELECT ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node WHERE n_id=$id]],
       { id = nid }
    )
    if err ~= nil then
