@@ -117,5 +117,5 @@ EOF
 NODENUMBER=$(make_node_update | ${CLUSTERD_BIN}clusterctl -w)
 
 if [ ! -z ${NODENUMBER_FILE+x} ]; then
-    echo -n $NODENUMBER > $NODENUMBER_FILE
+    echo -n $NODENUMBER | awk '{print $2}' > $NODENUMBER_FILE
 fi
