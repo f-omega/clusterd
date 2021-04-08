@@ -114,7 +114,7 @@ clusterd.output(node.number)
 EOF
 }
 
-make_node_update | ${CLUSTERD_BIN}clusterctl -w | read -r NODENUMBER
+NODENUMBER=$(make_node_update | ${CLUSTERD_BIN}clusterctl -w)
 
 if [ ! -z ${NODENUMBER_FILE+x} ]; then
     echo -n $NODENUMBER > $NODENUMBER_FILE
