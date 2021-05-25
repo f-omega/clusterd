@@ -1150,6 +1150,7 @@ function clusterd.assign_global_resource(ns, name, node, opts)
       end
    end
 end
+
 ------------------------------------------
 -- Resource claims                      --
 ------------------------------------------
@@ -1226,4 +1227,93 @@ function clusterd.release_claim(ns, name, pid)
    end
 end
 
+------------------------------------------
+-- Endpoints                            --
+------------------------------------------
+
+function clusterd.add_endpoint(ns, opts)
+  assert(ns ~= nil, 'namespace must be provided to add endpoint')
+  assert(type(opts) == "table", 'options must be a table')
+  assert(opts.processes ~= nil and type(opts.processes) == "table",
+         'at least one process must be provided to add endpoint')
+
+  resolved_ps = {}
+  for _, ps in ipairs(opts.processes) do
+    ps = clusterd.resolve_process(ns, ps)
+    if ps == nil then
+      error('process ' .. ps .. ' in namespace ' .. ns .. ' not found')
+    end
+    table.insert(resolved_ps, ps)
+  end
+
+  nsid = clusterd.resolve_namespace(ns)
+  if nsid == nil then
+    error('namespace ' .. ns .. ' not found')
+  end
+
+  -- Find a free endpoint
+  newepid, err = api.run([[ SELECT MAX(ep_id) AS ep_id FROM endpoint WHERE ep_ns=$ns ]], { ns=nsid })
+  if err ~= nil then
+    error('could not generate new endpoint id: ' .. err)
+  end
+
+  if #newepid == 0 then
+    newepid = 1
+  else
+    newepid = (newepid[1].ep_id or 0) + 1
+  end
+
+  -- Create the new endpoint, then add the claims
+  _, err = api.run(
+     [[INSERT INTO endpoint (ep_ns, ep_id)
+       VALUES ($ns, $epid)]],
+     { ns = nsid, epid = newepid }
+  )
+  if err ~= nil then
+    error('could not add endpoint: ' .. err)
+  end
+
+  -- Now add the claims
+  end
+
+function clusterd.get_endpoint(ns, ep)
+  assert(ns ~= nil, 'namespace must be provided to lookup endpoint')
+  assert(ep ~= nil, 'endpoint id must be provided to lookup endpoint')
+
+  nsid = clusterd.resolve_namespace(ns)
+  if nsid == nil then
+    error('namespace ' .. ns .. ' not found')
+  end
+
+  epid = tonumber(ep)
+  if epid == nil then
+    error('endpoint ' .. ep .. ' not found')
+  end
+
+  res, err = api.run(
+    [[SELECT ep_ns AS namespace, ep_id AS id FROM endpoint
+      WHERE ep_ns=$ns and ep_id=$epid]],
+    { ns=nsid, epid=epid }
+  )
+  if err ~= nil then
+    error('could not lookup endpoint ' .. ep .. ' in namespace ' .. ns .. ': ' .. err)
+  end
+
+  if #res == 0 then
+    return nil
+  end
+
+  ret = res[1]
+  res, err = api.run(
+    [[SELECT epc_process AS process FROM endpoint_claim
+      WHERE epc_ns=$ns AND epc_id=$epid]],
+    { ns=nsid, epid=epid }
+  )
+  if err ~= nil then
+    error('could not lookup endpoint claims: ' .. err)
+  end
+
+  ret.claims = res
+  return ret
+end
 return clusterd

@@ -1,3 +1,4 @@
+result
 nix-hash
 *.lua.c
 *.sql.c
@@ -10,7 +11,7 @@ CMakeFiles
 cmake_install.cmake
 CMakeCache.txt
 runtime
-
+raft
 *.html
 *.[123456789]
 
@@ -26,3 +27,5 @@ clusterd-ps
 libclusterctllib.a
 clusterd-setuidgidmap
 clusterd-config
+clusterd-nsportd
+clusterd-resource

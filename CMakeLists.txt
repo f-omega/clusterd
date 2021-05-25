@@ -9,9 +9,13 @@ set(CMAKE_C_EXTENSIONS ON)
 find_package(PkgConfig)
 pkg_check_modules(LIBUV REQUIRED libuv)
 pkg_check_modules(RAFT REQUIRED raft)
+pkg_check_modules(NETFILTER_QUEUE REQUIRED libnetfilter_queue)
+pkg_check_modules(MNL REQUIRED libmnl)
+pkg_check_modules(NFTABLES REQUIRED libnftables)
 
 find_package(Lua REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(Threads REQUIRED)
 
 function(preprocess_rc out_var)
   set(result)
@@ -32,12 +36,12 @@ function(preprocess_rc out_var)
   set(${out_var} "${result}" PARENT_SCOPE)
 endfunction()
 
-set(CLUSTERD_CFLAGS ${LIBUV_CFLAGS} ${RAFT_CFLAGS} -D_GNU_SOURCE)
+set(CLUSTERD_CFLAGS ${LIBUV_CFLAGS} ${RAFT_CFLAGS} ${NETFILTER_QUEUE_CFLAGS} ${MNL_CFLAGS} -D_GNU_SOURCE)
 
 add_compile_options(${CLUSTERD_CFLAGS})
 
 include_directories(PRIVATE src/include)
-include_directories(PUBLIC ${LUA_INCLUDE_DIR} ${SQLite3_INCLUDE_DIRS})
+include_directories(PUBLIC ${LUA_INCLUDE_DIR} ${SQLite3_INCLUDE_DIRS} ${NFTABLES_INCLUDE_DIRS})
 add_executable(clusterd-monitor src/programs/clusterd-monitor.c)
 target_link_libraries(clusterd-monitor ${LIBUV_LIBRARIES})
 
@@ -73,3 +77,7 @@ add_executable(clusterd-config src/programs/clusterd-config.c src/programs/confi
 
 add_executable(clusterd-resource src/programs/clusterd-resource.c)
 target_link_libraries(clusterd-resource clusterctllib)
+
+add_executable(clusterd-nsportd src/programs/clusterd-nsportd.c)
+target_link_libraries(clusterd-nsportd clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${NETFILTER_QUEUE_LIBRARIES} ${MNL_LIBRARIES} ${NFTABLES_LIBRARIES})
+

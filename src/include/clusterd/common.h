@@ -30,10 +30,12 @@
 typedef uint32_t clusterd_namespace_t;
 typedef uint32_t clusterd_service_t;
 typedef uint32_t clusterd_pid_t;
+typedef uint64_t clusterd_endpoint_t;
 
 #define NS_F   "%u"
 #define SVC_F  "%u"
 #define PID_F  "%u"
+#define EP_F   "%" PRIu64
 
 #define CLUSTERD_NTOH_NAMESPACE(ns) be64toh(ns)
 #define CLUSTERD_HTON_NAMESPACE(ns) htobe64(ns)

@@ -1,4 +1,14 @@
-zone: The availability zone for this data center
+zone: 
 dc: The data center this rack resides in
 rack: The physical rack this node resides in
 slot: The slot this node is in
+
+clusterd.set_failure_domains({
+  {name="zone", description="The availability zone for this data center"},
+  {name="dc", description="The data center this rack resides in"},
+  {name="rack", description="The physical rack this node resides in"},
+  {name="slot", description="The slot this node is in"}
+  })
+
+clusterd.update_resource_class("cpu", { description = "cpu bogomips available", fungible=true, quantifiable=true})
+clusterd.update_resource_class("memory", {description = "Total megabytes available", fungible=true, quantifiable=true})

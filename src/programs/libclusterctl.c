@@ -97,6 +97,7 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
   }
 
   if ( (hostsep - (controller + i)) > HOST_NAME_MAX ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Controller hostname is too long");
     errno = ENAMETOOLONG;
     return -1;
   } else {
@@ -114,6 +115,9 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not resolve controller %s:%s: %s", host, service,
                  gai_strerror(err));
+
+    errno = EINVAL;
+    return -1;
   }
 
   for ( curaddr = addrs, addrcnt = 0;
@@ -188,7 +192,7 @@ static int clusterctl_connect_random(clusterctl *c) {
   // We want to choose a random controller
   err = resolve_controller(&ctladdr, &ctladdrlen, controller, ctlix);
   if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not resolve controller");
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not resolve controller: %s", strerror(errno));
     return -1;
   }
 

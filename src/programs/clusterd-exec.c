@@ -1,4 +1,4 @@
-/*
+ /*
  * Copyright (c) 2021 F Omega Enterprises, LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -8,7 +8,7 @@
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
  *
- * The above copyright notice and this permission notice shall be included in all
+ * The above copyright notice and this permission notice shall be included in all  
  * copies or substantial portions of the Software.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -60,14 +60,14 @@ static const char *create_process_lua =
   "  if node == nil then\n"
   "    error('could not find node')\n"
   "  end\n"
-  "  clusterd.output(node.n_hostname)\n"
+  "  clusterd.output(node.hostname)\n"
   "end\n"
   "svc = clusterd.get_service(params.namespace, params.service)\n"
   "if svc == nil then\n"
   "  error('service ' .. params.service .. ' in namespace ' .. params.namespace .. ' not found')\n"
   "end\n"
   "pid = clusterd.new_process(params.namespace, svc.s_id,\n"
-  "                           { placement = node.n_id })\n"
+  "                           { placement = node.id })\n"
   "clusterd.output(pid)\n";
 
 static const char *kill_process_lua =

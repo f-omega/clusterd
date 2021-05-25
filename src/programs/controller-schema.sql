@@ -214,3 +214,36 @@ CREATE TABLE IF NOT EXISTS global_resource_claim
       REFERENCES process(ps_ns, ps_id)
       ON DELETE CASCADE
   );
+
+-- An endpoint is a static IP that gets resolved by the default
+-- clusterd resolver to an internal IPv6 address that can load balance
+-- a connection between multiple target processes.
+
+CREATE TABLE IF NOT EXISTS endpoint
+  ( ep_ns INTEGER NOT NULL
+
+  , ep_id INTEGER NOT NULL
+
+  , PRIMARY KEY (ep_ns, ep_id)
+
+  , CONSTRAINT ep_namespace_fk
+      FOREIGN KEY (ep_ns)
+      REFERENCES namespace(ns_id)
+      ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS endpoint_claim
+  ( epc_ns INTEGER NOT NULL
+  , epc_id INTEGER NOT NULL
+  , epc_process INTEGER NOT NULL
+
+  , PRIMARY KEY (epc_ns, epc_id, epc_process)
+  , CONSTRAINT epc_endpoint_fk
+      FOREIGN KEY (epc_ns, epc_id)
+      REFERENCES endpoint(ep_ns, ep_id)
+      ON DELETE CASCADE
+  , CONSTRAINT epc_process_fk
+      FOREIGN KEY (epc_ns, epc_process)
+      REFERENCES process(ps_ns, ps_id)
+      ON DELETE CASCADE
+  );
