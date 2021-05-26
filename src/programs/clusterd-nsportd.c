@@ -51,7 +51,7 @@
 
 #include <nftables/libnftables.h>
 
-#define CLUSTERD_ENDPOINT_NETWORK_ADDR "fdf0:5f7b:911f:1"
+#define CLUSTERD_ENDPOINT_NETWORK_ADDR "fdf0:5f7b:911f:2"
 
 #define MAX_PENDING_PACKETS 1000
 #define MAX_CLUSTERCTL_CONN_KEEPALIVE 30000 // Keep connections to clusterctl alive for 30 seconds at least
