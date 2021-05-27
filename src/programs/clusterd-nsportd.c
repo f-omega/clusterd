@@ -58,7 +58,7 @@
 
 #define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 8
 static uint8_t CLUSTERD_ENDPOINT_PREFIX[CLUSTERD_ENDPOINT_PREFIX_BYTELEN] =
-  { 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f, 0x00, 0x01 };
+  { 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f, 0x00, 0x02 };
 static const char CLUSTERD_ENDPOINT_NETWORK[] = CLUSTERD_ENDPOINT_NETWORK_ADDR "::/64";
 
 struct pending_packet {
