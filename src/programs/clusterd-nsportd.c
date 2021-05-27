@@ -149,18 +149,18 @@ static int flush_tables(const char *tblname) {
     goto done;
   }
 
-  err = snprintf(cmdbuf, sizeof(cmdbuf), "delete table bridge %s", tblname);
+  err = snprintf(cmdbuf, sizeof(cmdbuf), "delete table inet %s", tblname);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
 
   // May or may not fail, doesn't matter
   nft_run_cmd_from_buffer(nft, cmdbuf);
 
-  err = snprintf(cmdbuf, sizeof(cmdbuf), "add table bridge %s {\n"
+  err = snprintf(cmdbuf, sizeof(cmdbuf), "add table inet %s {\n"
                  "set clusterd-endpoints { type ipv6_addr; flags timeout; }\n"
                  "counter ip6_pkts { }\n"
                  "counter ip6_net_pkts {} \n"
-                 "chain INPUT {\n"
-                 "  type filter hook input priority filter; policy accept;\n"
+                 "chain FORWARD {\n"
+                 "  type filter hook forward priority filter; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s counter name ip6_net_pkts queue num %d;\n"
                  "}\n"
