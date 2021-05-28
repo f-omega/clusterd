@@ -474,7 +474,7 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
       struct tcphdr tcp;
 
       memcpy(&epid, hdr.daddr.s6_addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN, 4);
-      epid = bswap_64(epid);
+      epid = ntohl(epid);
 
       switch ( hdr.nexthdr ) {
       case IPPROTO_ICMPV6:
