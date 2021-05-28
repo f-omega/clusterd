@@ -56,10 +56,9 @@
 #define MAX_PENDING_PACKETS 1000
 #define MAX_CLUSTERCTL_CONN_KEEPALIVE 30000 // Keep connections to clusterctl alive for 30 seconds at least
 
-#define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 8
+#define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 12
 static uint8_t CLUSTERD_ENDPOINT_PREFIX[CLUSTERD_ENDPOINT_PREFIX_BYTELEN] =
-  { 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f, 0x00, 0x02 };
-static const char CLUSTERD_ENDPOINT_NETWORK[] = CLUSTERD_ENDPOINT_NETWORK_ADDR "::/64";
+  { 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
 
 struct pending_packet {
   uint32_t pkt_id;
@@ -136,6 +135,10 @@ static int flush_tables(const char *tblname) {
   char cmdbuf[16*1024];
   struct nft_ctx *nft;
   int ret = -1, err;
+  uint16_t nshi, nslo;
+
+  nshi = (uint16_t) ((g_nsid >> 16) & 0xFFFF);
+  nslo = (uint16_t) (g_nsid & 0xFFFF);
 
   nft = nft_ctx_new(NFT_CTX_DEFAULT);
   if ( !nft ) {
@@ -162,9 +165,9 @@ static int flush_tables(const char *tblname) {
                  "chain FORWARD {\n"
                  "  type filter hook forward priority filter; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
-                 "  ip6 daddr %s counter name ip6_net_pkts queue num %d;\n"
+                 "  ip6 daddr %s:%04x:%04x::/96 counter name ip6_net_pkts queue num %d;\n"
                  "}\n"
-                 "}\n", tblname, CLUSTERD_ENDPOINT_NETWORK, g_queue_num);
+                 "}\n", tblname, CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
 
   nft_run_cmd_from_buffer(nft, cmdbuf);
@@ -470,7 +473,7 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
       struct udphdr udp;
       struct tcphdr tcp;
 
-      memcpy(&epid, hdr.daddr.s6_addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN, 8);
+      memcpy(&epid, hdr.daddr.s6_addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN, 4);
       epid = bswap_64(epid);
 
       switch ( hdr.nexthdr ) {
@@ -570,11 +573,59 @@ static int queue_cb(const struct nlmsghdr *nlh, void *data) {
   return process_packet(ph, plen, payload, payload_len);
 }
 
+static int lookup_namespace(const char *ns) {
+  static const char lookup_ns_lua[] =
+    "ns = clusterd.resolve_namespace(params.namespace)\n"
+    "if ns == nil then\n"
+    "  error('could not find namespace')\n"
+    "end\n"
+    "clusterd.output(tostring(ns))\n";
+
+  clusterctl ctl;
+  int err, ret = -1;
+  char nsidbuf[128];
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl connection: %s", strerror(errno));
+    return -1;
+  }
+
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
+                               lookup_ns_lua,
+                               nsidbuf, sizeof(nsidbuf),
+                               "namespace", ns, NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup namespace: %s", strerror(errno));
+    goto done;
+  }
+
+  err = sscanf(nsidbuf, NS_F, &g_nsid);
+  if ( err != 1 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read namespace from returned value %s", nsidbuf);
+    goto done;
+  }
+
+  // Now set the lower bits of CLUSTERD_ENDPOINT_PREFIX
+  CLUSTERD_ENDPOINT_PREFIX[8] = (uint8_t) ((g_nsid >> 24) & 0xFF);
+  CLUSTERD_ENDPOINT_PREFIX[9] = (uint8_t) ((g_nsid >> 16) & 0xFF);
+  CLUSTERD_ENDPOINT_PREFIX[10] = (uint8_t) ((g_nsid >> 8) & 0xFF);
+  CLUSTERD_ENDPOINT_PREFIX[11] = (uint8_t) (g_nsid & 0xFF);
+
+  ret = 0;
+
+ done:
+  clusterctl_close(&ctl);
+  return ret;
+}
+
 static void usage() {
   fprintf(stderr, "clusterd-nsportd -- manage an on-demand clusterd namespace port mapping using netfilter\n");
-  fprintf(stderr, "Usage: clusterd-nsportd -vh [-t TABLE] [-N THCNT] [-n QLEN] -s NAMESPACE -q QUEUENUM\n");
+  fprintf(stderr, "Usage: clusterd-nsportd -vh [-t TABLE] [-N THCNT] [-l QLEN] -s NSFILE -q QUEUENUM\n");
+  fprintf(stderr, "         -n NAMESPACE\n");
   fprintf(stderr, "   -t TABLE     The netfilter table that contains the TCP and UDP port maps\n");
-  fprintf(stderr, "   -n QLEN      Number of packets that can be enqueued at the same time (100 by default)\n");
+  fprintf(stderr, "   -l QLEN      Number of packets that can be enqueued at the same time (100 by default)\n");
+  fprintf(stderr, "   -n NAMESPACE Namespace to use to lookup queries\n");
   fprintf(stderr, "   -N THCNT     Number of threads that run to serve packet requests\n");
   fprintf(stderr, "   -s NSFILE    Name of network namespace file\n");
   fprintf(stderr, "   -q QUEUENUM  The netfilter queue which receives traffic for unknown TCP/UDP ports\n");
@@ -915,7 +966,7 @@ static int start_threads(int thcnt, int nftfd) {
 
 int main (int argc, char *const *argv) {
   int c, err, pktlen = 100, thcnt = -1, nftfd;
-  const char *ns_file = NULL;
+  const char *ns_file = NULL, *namespace = "default";
   struct mnl_socket *nl;
   unsigned int portid;
   sigset_t mask;
@@ -957,7 +1008,7 @@ int main (int argc, char *const *argv) {
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "t:q:n:N:s:vh")) != -1 ) {
+  while ( (c = getopt(argc, argv, "t:q:n:l:N:s:vh")) != -1 ) {
     switch ( c ) {
     case 't':
       g_table_name = optarg;
@@ -968,6 +1019,10 @@ int main (int argc, char *const *argv) {
       break;
 
     case 'n':
+      namespace = optarg;
+      break;
+
+    case 'l':
       err = sscanf(optarg, "%d", &pktlen);
       if ( err != 1 || pktlen < 0 ) {
 	CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid packet queue length: %d", pktlen);
@@ -1047,6 +1102,12 @@ int main (int argc, char *const *argv) {
   err = allocate_packet_queue(pktlen);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not allocate packet queue: %s", strerror(errno));
+    return 1;
+  }
+
+  err = lookup_namespace(namespace);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not find namespace %s", namespace);
     return 1;
   }
 
