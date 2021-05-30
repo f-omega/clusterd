@@ -735,7 +735,11 @@ function clusterd.resolve_process(ns, pid)
         WHERE ps_ns = $ns AND ps_id = $pid]],
       { ns = nsid, pid = pid }
    )
-   if err ~= nil or #res ~= 1 then
+   if err ~= nil then
+     error('Could not search for pid ' .. pid .. ': ' .. err)
+   end
+
+   if #res ~= 1 then
       return nil
    end
 
