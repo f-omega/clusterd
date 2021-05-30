@@ -733,7 +733,7 @@ function clusterd.resolve_process(ns, pid)
    res, err = api.run(
       [[SELECT ps_id FROM process
         WHERE ps_ns = $ns AND ps_id = $pid]],
-      { ns = ns, pid = pid }
+      { ns = nsid, pid = pid }
    )
    if err ~= nil or #res ~= 1 then
       return nil
@@ -1239,11 +1239,11 @@ function clusterd.add_endpoint(ns, opts)
 
   resolved_ps = {}
   for _, ps in ipairs(opts.processes) do
-    ps = clusterd.resolve_process(ns, ps)
-    if ps == nil then
+    psid = clusterd.resolve_process(ns, ps)
+    if psid == nil then
       error('process ' .. ps .. ' in namespace ' .. ns .. ' not found')
     end
-    table.insert(resolved_ps, ps)
+    table.insert(resolved_ps, psid)
   end
 
   nsid = clusterd.resolve_namespace(ns)
