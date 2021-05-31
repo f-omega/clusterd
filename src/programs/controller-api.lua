@@ -1278,7 +1278,19 @@ function clusterd.add_endpoint(ns, opts)
   end
 
   -- Now add the claims
+  for _, psid in ipairs(resolved_ps) do
+    _, err = api.run(
+      [[INSERT INTO endpoint_claim (epc_ns, epc_id, epc_process)
+        VALUES ($ns, $epid, $psid)]],
+      { ns = nsid, epid = newepid, psid = psid }
+    )
+    if err ~= nil then
+      error('could not add process ' .. tostring(psid) .. ' to endpoint: ' .. err)
+    end
   end
+
+  return clusterd.get_endpoint(nsid, newepid)
+end
 
 function clusterd.get_endpoint(ns, ep)
   assert(ns ~= nil, 'namespace must be provided to lookup endpoint')
