@@ -1267,6 +1267,8 @@ function clusterd.add_endpoint(ns, opts)
     newepid = (newepid[1].ep_id or 0) + 1
   end
 
+  error("Got processes " .. json.encode(resolved_ps))
+
   -- Create the new endpoint, then add the claims
   _, err = api.run(
      [[INSERT INTO endpoint (ep_ns, ep_id)
