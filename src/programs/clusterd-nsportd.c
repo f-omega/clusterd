@@ -284,6 +284,30 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
   }
 }
 
+static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
+  int err;
+
+ send_cmd_again:
+  err = send(nftfd, cmdbuf, cmdsz, 0);
+  if ( err < 0 ) {
+    if ( errno == EINTR ) goto send_cmd_again;
+    else {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send NFTables commands: %s", strerror(errno));
+      return -1;
+    }
+  } else if ( err == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "NFTables thread exited");
+    exit(EXIT_FAILURE);
+  } else if ( err != cmdsz ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Command was sent incomplete. Wanted %d bytes, but only sent %d",
+                 cmdsz, err);
+  } else
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Commands submitted");
+
+  return 0;
+
+}
+
 static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
   char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
@@ -315,13 +339,14 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   }
 
   // Create a new verdict map named after the endpoint, if needed
-  cmdpos = 0;
 #define WRITE_BUFFER(s, ...) do {                                       \
     err = snprintf(cmdbuf + cmdpos, sizeof(cmdbuf) - cmdpos, s VA_ARGS (__VA_ARGS__)); \
     if ( err >= (sizeof(cmdbuf) - cmdpos) ) goto cmd_overflow;          \
     cmdpos += err;                                                      \
   } while (0)
+#define RESET_BUFFER() cmdpos = 0
 
+  RESET_BUFFER();
   if ( pscnt > 1 ) {
     WRITE_BUFFER("add rule inet %s NAT ip6 daddr %s dnat ip6 to random mod %d map {",
                  g_table_name, endpointaddr, pscnt);
@@ -334,40 +359,19 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
                  g_table_name, endpointaddr, processes[0]);
   }
 
+  if ( run_nft_command(nftfd, cmdbuf, cmdpos) < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add nftables rule: %s", strerror(errno));
+    return -1;
+  }
+
+  RESET_BUFFER();
   // Add endpoint address to the set
   WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout %ds }\n", g_table_name, endpointaddr, RULE_TTL_SECONDS);
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Adding rule %.*s", cmdpos, cmdbuf);
-
- send_cmd_again:
-  err = send(nftfd, cmdbuf, cmdpos, 0);
-  if ( err < 0 ) {
-    if ( errno == EINTR ) goto send_cmd_again;
-    else {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send NFTables commands: %s", strerror(errno));
-      return -1;
-    }
-  } else if ( err == 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "NFTables thread exited");
-    exit(EXIT_FAILURE);
-  } else if ( err != cmdpos ) {
-    CLUSTERD_LOG(CLUSTERD_WARNING, "Command was sent incomplete. Wanted %d bytes, but only sent %d",
-                 cmdpos, err);
-  } else
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Commands submitted");
-
-  // Add all vmap entries
-  // err = snprintf(cmdbuf, sizeof(cmdbuf),
-  //                "add elements bridge %s clusterd-endpoints { %s timeout %d }\n" // This causes packets to be accepted
-  //                "add rule inet %s prerouting ip6 daddr %s random mod %d { ... }\n" // Add the DNAT load balancing
-  //                g_table_name, endpointaddr, timeout, endpointaddr, addrcnt);
-  // if ( err >= sizeof(cmdbuf) ) {
-  //   CLUSTERD_LOG(CLUSTERD_WARNING, "Could not add %s to clusterd-endpoint set", endpointaddr);
-  // } else {
-  //   nft_run_cmd_from_buffer(nft, cmdbuf);
-  // }
-
-  // Add a rule to DNAT based on the endpoint
+  if ( run_nft_command(nftfd, cmdbuf, cmdpos) < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add endpoint to endpoint set: %s", strerror(errno));
+    return -1;
+  }
 
   return 0;
 
