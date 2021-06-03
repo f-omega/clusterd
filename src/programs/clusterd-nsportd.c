@@ -318,12 +318,17 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
     cmdpos += err;                                                      \
   } while (0)
 
-  WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s random mod %d {",
-               g_table_name, endpointaddr, pscnt);
-  for ( i = 0; i < pscnt; ++i ) {
-    WRITE_BUFFER("%s%s", i == 0 ? "" : ", ",  processes[i]);
+  if ( pscnt > 1 ) {
+    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to random mod %d map {",
+                 g_table_name, endpointaddr, pscnt);
+    for ( i = 0; i < pscnt; ++i ) {
+      WRITE_BUFFER("%s%d: %s", i == 0 ? "" : ", ",  i, processes[i]);
+    }
+    WRITE_BUFFER("}\n");
+  } else {
+    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to %s",
+                 g_table_name, endpointaddr, processes[0]);
   }
-  WRITE_BUFFER("}\n");
 
   // Add endpoint address to the set
   WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout %ds }\n", g_table_name, endpointaddr, RULE_TTL_SECONDS);
