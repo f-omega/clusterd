@@ -53,6 +53,9 @@
 
 #define CLUSTERD_ENDPOINT_NETWORK_ADDR "fdf0:5f7b:911f:2"
 
+#define HIDWORD(x) ((uint16_t) (((x) >> 16) & 0xFFFF))
+#define LODWORD(x) ((uint16_t) ((x) & 0xFFFF))
+
 #define MAX_PENDING_PACKETS 1000
 #define MAX_CLUSTERCTL_CONN_KEEPALIVE 30000 // Keep connections to clusterctl alive for 30 seconds at least
 
@@ -186,13 +189,68 @@ static int flush_tables(const char *tblname) {
 
 static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
-  char cmdbuf[16*1024];
-  int err;
+  char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
+  int err, cmdpos, pscnt, i;
+
+  const char *processes[128];
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule for epid=" EP_F ", proto=%d, port=%u:\n%s",
 	       epid, proto, port, rulebuf);
 
+  err = snprintf(endpointaddr, sizeof(endpointaddr),
+                 CLUSTERD_ENDPOINT_NETWORK_ADDR "%04x:%04x:%04x:%04x",
+                 HIDWORD(g_nsid), LODWORD(g_nsid), HIDWORD(epid), LODWORD(epid));
+  if ( err >= sizeof(endpointaddr) ) goto cmd_overflow;
+
+  memset(processes, 0, sizeof(processes));
+  for ( pscnt = 0, psaddr = strtok_r(rulebuf, "\n", &save);
+        psaddr;
+        psaddr = strtok_r(rulebuf, "\n", &save) ) {
+    processes[pscnt++] = psaddr;
+  }
+
+  if ( pscnt == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Endpoint " EP_F " had no processes associated with it. Doing nothing",
+                 epid);
+    return 0;
+  }
+
   // Create a new verdict map named after the endpoint, if needed
+  cmdpos = 0;
+#define WRITE_BUFFER(s, ...) do {                                       \
+    err = snprintf(cmdbuf + cmdpos, sizeof(cmdbuf) - cmdpos, s VA_ARGS (__VA_ARGS__)); \
+    if ( err >= (sizeof(cmdbuf) - cmdpos) ) goto cmd_overflow;          \
+    cmdpos += err;                                                      \
+  } while (0)
+
+  WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s random mod %d {",
+               g_table_name, endpointaddr, pscnt);
+  for ( i = 0; i < pscnt; ++i ) {
+    WRITE_BUFFER("%s%s", i == 0 ? "" : ", ",  processes[i]);
+  }
+  WRITE_BUFFER("}\n");
+
+  // Add endpoint address to the set
+  WRITE_BUFFER(cmdbuf, cmdpos, "add element inet %s %s { %s timeout 300s }\n");
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Adding rule %.*s", cmdpos, cmdbuf);
+
+ send_cmd_again:
+  err = send(nftfd, cmdbuf, cmdpos, 0);
+  if ( err < 0 ) {
+    if ( errno == EINTR ) goto send_cmd_again;
+    else {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not send NFTables commands: %s", strerror(errno));
+      return -1;
+    }
+  } else if ( err == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "NFTables thread exited");
+    exit(EXIT_FAILURE);
+  } else if ( err != cmdpos ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Command was sent incomplete. Wanted %d bytes, but only sent %d",
+                 cmdpos, err);
+  } else
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Commands submitted");
 
   // Add all vmap entries
   // err = snprintf(cmdbuf, sizeof(cmdbuf),
@@ -208,6 +266,11 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   // Add a rule to DNAT based on the endpoint
 
   return 0;
+
+ cmd_overflow:
+  CLUSTERD_LOG(CLUSTERD_WARNING, "Could not write rules for %s: buffer overflow", endpointaddr);
+  errno = ENOBUFS;
+  return -1;
 }
 
 static int find_and_apply_rule(int nftfd, clusterctl *ctl,
@@ -224,11 +287,10 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
     "  error('could not find endpoint')\n"
     "end\n"
     "\n"
-    "psmap = '{ type ipv6_addr : verdict; '\n"
+    "psmap = ''\n"
     "for _, p in ipairs(ep.claims) do\n"
-    "  psmap = psmap .. get_process_ip(ep.namespace, p.process) .. ' : goto ' .. params.desttable\n"
+    "  psmap = psmap .. get_process_ip(ep.namespace, p.process) .. '\\n'\n"
     "end\n"
-    "psmap = psmap .. ' }'\n"
     "clusterd.output(psmap);\n";
 
   // Now we look up the port mapping by ID, proto, and port
@@ -273,7 +335,6 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
 			       "namespace", nsidstr,
 			       "endpoint", epidstr,
 			       "proto", protostr,
-                               "desttable", "mytable",
 			       NULL);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup rule (ns=" NS_F ", endpoint=" EP_F ", proto=%s, port=%u)",
@@ -724,7 +785,7 @@ static ssize_t recv_fds(int fd, void *data, size_t datalen,
   return ret;
 }
 
-static int nft_worker(int workfd) {
+static int nft_worker(int workfd, struct nft_ctx *nft) {
   for (;;) {
     int err;
     char cmdbuf[16 * 1024];
@@ -740,7 +801,8 @@ static int nft_worker(int workfd) {
     else {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Running command %.*s", (int) cmdsz, cmdbuf);
 
-      // TODO
+      nft_run_cmd_from_buffer(nft, cmdbuf);
+      // TODO error reporting
     }
   }
 }
@@ -792,6 +854,7 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
   } else if ( child == 0 ) {
     int nl_fd;
     struct mnl_socket *nl;
+    struct nft_ctx *nft;
     close(sts[0]);
 
     err = reset_child_streams();
@@ -812,6 +875,18 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Could not flush nftables");
       return NULL;
+    }
+
+    nft = nft_ctx_new(NFT_CTX_DEFAULT);
+    if ( ! nft ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create nftables context in worker: %s", strerror(errno));
+      goto report_error;
+    }
+
+    err = nft_ctx_buffer_output(nft);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable nftables buffering output in worker");
+      goto report_error;
     }
 
     // Now attempt to open the netlink socket
@@ -842,7 +917,7 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
       exit(EXIT_FAILURE);
     }
 
-    exit(nft_worker(sts[1]));
+    exit(nft_worker(sts[1], nft));
   } else {
     unsigned char childsts;
     int nl_fd;
