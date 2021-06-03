@@ -204,8 +204,8 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   memset(processes, 0, sizeof(processes));
   for ( pscnt = 0, psaddr = strtok_r(rulebuf, "\n", &save);
-        psaddr;
-        psaddr = strtok_r(rulebuf, "\n", &save) ) {
+        psaddr && pscnt < (sizeof(processes)/sizeof(processes[0]));
+        psaddr = strtok_r(NULL, "\n", &save) ) {
     processes[pscnt++] = psaddr;
   }
 
