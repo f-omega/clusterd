@@ -179,7 +179,7 @@ static int flush_tables(const char *tblname) {
                  "counter ip6_pkts { }\n"
                  "counter ip6_net_pkts {} \n"
                  "chain FORWARD {\n"
-                 "  type nat hook forward priority filter; policy accept;\n"
+                 "  type nat hook prerouting priority filter; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter name ip6_net_pkts queue num %d;\n"
                  "}\n"
