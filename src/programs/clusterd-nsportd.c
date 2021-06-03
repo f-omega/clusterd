@@ -326,7 +326,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
     }
     WRITE_BUFFER("}\n");
   } else {
-    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to %s",
+    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to %s\n",
                  g_table_name, endpointaddr, processes[0]);
   }
 
