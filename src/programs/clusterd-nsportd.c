@@ -53,6 +53,7 @@
 #include <nftables/libnftables.h>
 
 #define CLUSTERD_ENDPOINT_NETWORK_ADDR "fdf0:5f7b:911f:2"
+#define CLUSTERD_ENDPOINT_PROCESS_ADDR "fdf0:5f7b:911f:2"
 
 #define HIDWORD(x) ((uint16_t) (((x) >> 16) & 0xFFFF))
 #define LODWORD(x) ((uint16_t) ((x) & 0xFFFF))
@@ -383,7 +384,7 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
     "   p = string.format('%08x', proc)\n"
     "   ns = string.format('%08x', ns)\n"
     "   a = ns:sub(1, 4) .. ':' .. ns:sub(5, 8) .. ':' .. p:sub(1, 4) .. ':' .. p:sub(5, 8)\n"
-    "   return '" CLUSTERD_ENDPOINT_NETWORK_ADDR ":' .. a\n"
+    "   return '" CLUSTERD_ENDPOINT_PROCESS_ADDR ":' .. a\n"
     "end\n"
     "ep = clusterd.get_endpoint(params.namespace, params.endpoint)\n"
     "if ep == nil then\n"
