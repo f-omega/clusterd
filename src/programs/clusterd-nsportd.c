@@ -32,6 +32,7 @@
 #include <pthread.h>
 #include <byteswap.h>
 #include <fcntl.h>
+#include <uthash.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -58,6 +59,7 @@
 
 #define MAX_PENDING_PACKETS 1000
 #define MAX_CLUSTERCTL_CONN_KEEPALIVE 30000 // Keep connections to clusterctl alive for 30 seconds at least
+#define RULE_TTL_SECONDS 300
 
 #define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 12
 static uint8_t CLUSTERD_ENDPOINT_PREFIX[CLUSTERD_ENDPOINT_PREFIX_BYTELEN] =
@@ -71,6 +73,14 @@ struct pending_packet {
   uint16_t port;
 
   struct pending_packet *next;
+};
+
+struct mapped_endpoint {
+  clusterd_endpoint_t endpoint_id;
+  struct timespec last_updated;
+  int ttl;
+
+  UT_hash_handle hh;
 };
 
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
@@ -90,6 +100,9 @@ static sig_atomic_t g_should_terminate = 0;
 static sig_atomic_t g_sighup = 0;
 
 static struct mnl_socket *g_netlink_socket;
+
+static pthread_mutex_t g_endpoint_mutex;
+struct mapped_endpoint *g_endpoints = NULL;
 
 static int send_verdict(uint32_t pkt_id, int verdict);
 static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t port, int proto);
@@ -187,6 +200,86 @@ static int flush_tables(const char *tblname) {
   goto done;
 }
 
+static int endpoint_exists(clusterd_endpoint_t epid) {
+  struct mapped_endpoint *ep = NULL;
+
+  if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not lookup endpoint " EP_F ": could not lock mutex", epid);
+    return 0;
+  }
+
+  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  if ( ep ) {
+    struct timespec now, expiry;
+
+    // TODO think about keeping a global clock, to avoid system calls
+    if ( clock_gettime(CLOCK_MONOTONIC, &now) < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not get time while looking up endpoint " EP_F ": %s",
+                   epid, strerror(errno));
+      ep = NULL;
+      goto done;
+    }
+
+    // Check if the endpoint is still active
+    memcpy(&expiry, &ep->last_updated, sizeof(struct timespec));
+    timespec_add_ms(&expiry, ep->ttl);
+
+    if ( timespec_cmp(&expiry, &now) <= 0 ) {
+      // Endpoint is expired
+      HASH_DEL(g_endpoints, ep);
+
+      // TODO we ought to remove the rule too
+      CLUSTERD_LOG(CLUSTERD_INFO, "TODO endpoint is expired. Should remove stale rule");
+
+      free(ep);
+      ep = NULL;
+    }
+  }
+
+ done:
+  if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not unlock endpoint mutex while looking up " EP_F, epid);
+  }
+
+  return (ep != NULL);
+}
+
+// This function ensures that the mapped_endpoint record for this
+// endpoint is up-to-date (time is updated)
+static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
+  struct mapped_endpoint *ep;
+
+  if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not update endpoint " EP_F ": could not lock mutex", epid);
+    return;
+  }
+
+  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  if ( !ep ) {
+    ep = malloc(sizeof(struct mapped_endpoint));
+    if ( ! ep ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not allocate new endpoint");
+      goto done;
+    }
+
+    ep->endpoint_id = epid;
+    HASH_ADD(hh, g_endpoints, endpoint_id, sizeof(ep->endpoint_id), ep);
+  }
+
+  if ( clock_gettime(CLOCK_MONOTONIC, &ep->last_updated) < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not get time while updating endpoint " EP_F ": %s",
+                 epid, strerror(errno));
+    goto done;
+  }
+
+  ep->ttl = ttl_ms;
+
+ done:
+  if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not unlock endpoint mutex while updating " EP_F, epid);
+  }
+}
+
 static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
   char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
@@ -194,11 +287,13 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   const char *processes[128];
 
+  update_endpoint(epid, RULE_TTL_SECONDS * 1000);
+
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule for epid=" EP_F ", proto=%d, port=%u:\n%s",
 	       epid, proto, port, rulebuf);
 
   err = snprintf(endpointaddr, sizeof(endpointaddr),
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR "%04x:%04x:%04x:%04x",
+                 CLUSTERD_ENDPOINT_NETWORK_ADDR ":%04x:%04x:%04x:%04x",
                  HIDWORD(g_nsid), LODWORD(g_nsid), HIDWORD(epid), LODWORD(epid));
   if ( err >= sizeof(endpointaddr) ) goto cmd_overflow;
 
@@ -231,7 +326,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   WRITE_BUFFER("}\n");
 
   // Add endpoint address to the set
-  WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout 300s }\n", g_table_name, endpointaddr);
+  WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout %ds }\n", g_table_name, endpointaddr, RULE_TTL_SECONDS);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Adding rule %.*s", cmdpos, cmdbuf);
 
@@ -549,22 +644,30 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 
 	/* Verify that the endpoint exists with the given port */
 	CLUSTERD_LOG(CLUSTERD_DEBUG, "Got TCP packet to port %u", ntohs(tcp.dest));
-	if ( enqueue_packet(id, epid, ntohs(tcp.dest), IPPROTO_TCP) == 0 ) {
-	  CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not enqueue TCP packet: %s", strerror(errno));
-	  verdict = -1;
-	} else
-	  verdict = NF_DROP;
+        /* Check if the endpoint is already mapped */
+        if ( endpoint_exists(epid) )
+          verdict = NF_ACCEPT;
+        else {
+          if ( enqueue_packet(id, epid, ntohs(tcp.dest), IPPROTO_TCP) == 0 ) {
+            CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not enqueue TCP packet: %s", strerror(errno));
+            verdict = -1;
+          } else
+            verdict = NF_DROP;
+        }
 	break;
 
       case IPPROTO_UDP:
 	memcpy(&udp, (void *) (p + sizeof(hdr)), sizeof(udp));
 
 	/* Same as TCP */
-	CLUSTERD_LOG(CLUSTERD_DEBUG, "Got UDP packet");
-	if ( enqueue_packet(id, epid, ntohs(udp.dest), IPPROTO_UDP) == 0 )
-	  verdict = -1;
-	else
-	  verdict = NF_DROP;
+	if ( endpoint_exists(epid) )
+          verdict = NF_ACCEPT;
+        else {
+          if ( enqueue_packet(id, epid, ntohs(udp.dest), IPPROTO_UDP) == 0 )
+            verdict = -1;
+          else
+            verdict = NF_DROP;
+        }
 	break;
 
       default:
@@ -1005,6 +1108,12 @@ static int start_threads(int thcnt, int nftfd) {
   int i, n = 0, err;
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting %d thread(s) for thread pool", thcnt);
+
+  err = pthread_mutex_init(&g_endpoint_mutex, NULL);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create endpoint mutex: %s", strerror(errno));
+    return -1;
+  }
 
   err = pthread_mutex_init(&g_packet_queue_mutex, NULL);
   if ( err != 0 ) {
