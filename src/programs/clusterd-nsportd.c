@@ -231,7 +231,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   WRITE_BUFFER("}\n");
 
   // Add endpoint address to the set
-  WRITE_BUFFER(cmdbuf, cmdpos, "add element inet %s %s { %s timeout 300s }\n");
+  WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout 300s }\n", g_table_name, endpointaddr);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Adding rule %.*s", cmdpos, cmdbuf);
 
