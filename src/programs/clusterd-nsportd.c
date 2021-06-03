@@ -179,7 +179,7 @@ static int flush_tables(const char *tblname) {
                  "counter ip6_pkts { }\n"
                  "counter ip6_net_pkts {} \n"
                  "chain FORWARD {\n"
-                 "  type filter hook forward priority filter; policy accept;\n"
+                 "  type nat hook forward priority filter; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter name ip6_net_pkts queue num %d;\n"
                  "}\n"
@@ -319,14 +319,14 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   } while (0)
 
   if ( pscnt > 1 ) {
-    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to random mod %d map {",
+    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat ip6 to random mod %d map {",
                  g_table_name, endpointaddr, pscnt);
     for ( i = 0; i < pscnt; ++i ) {
       WRITE_BUFFER("%s%d: %s", i == 0 ? "" : ", ",  i, processes[i]);
     }
     WRITE_BUFFER("}\n");
   } else {
-    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat to %s\n",
+    WRITE_BUFFER("add rule inet %s prerouting ip6 daddr %s dnat ip6 to %s\n",
                  g_table_name, endpointaddr, processes[0]);
   }
 
