@@ -288,7 +288,7 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
   int err;
 
  send_cmd_again:
-  err = send(nftfd, cmdbuf, cmdsz, 0);
+  err = send(nftfd, cmdbuf, strlen(cmdbuf), 0);
   if ( err < 0 ) {
     if ( errno == EINTR ) goto send_cmd_again;
     else {
