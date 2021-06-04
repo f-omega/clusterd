@@ -287,8 +287,10 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
 static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
   int err;
 
+  cmdsz ++; // Include nul byte
+
  send_cmd_again:
-  err = send(nftfd, cmdbuf, strlen(cmdbuf) + 1, 0);
+  err = send(nftfd, cmdbuf, cmdsz, 0);
   if ( err < 0 ) {
     if ( errno == EINTR ) goto send_cmd_again;
     else {
