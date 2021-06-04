@@ -53,7 +53,7 @@
 #include <nftables/libnftables.h>
 
 #define CLUSTERD_ENDPOINT_NETWORK_ADDR "fdf0:5f7b:911f:2"
-#define CLUSTERD_ENDPOINT_PROCESS_ADDR "fdf0:5f7b:911f:2"
+#define CLUSTERD_ENDPOINT_PROCESS_ADDR "fdf0:5f7b:911f:1"
 
 #define HIDWORD(x) ((uint16_t) (((x) >> 16) & 0xFFFF))
 #define LODWORD(x) ((uint16_t) ((x) & 0xFFFF))
