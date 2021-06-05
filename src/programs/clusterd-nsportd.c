@@ -102,6 +102,8 @@ static sig_atomic_t g_sighup = 0;
 
 static struct mnl_socket *g_netlink_socket;
 
+static pthread_mutex_t g_nft_mutex;
+
 static pthread_mutex_t g_endpoint_mutex;
 struct mapped_endpoint *g_endpoints = NULL;
 
@@ -286,9 +288,16 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
 }
 
 static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
-  int err;
+  int err, status, ret = 0;
+  char respbuf[8192];
+  ssize_t respsz;
 
   cmdsz ++; // Include nul byte
+
+  if ( pthread_mutex_lock(&g_nft_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lock nft mutex");
+    return -1;
+  }
 
  send_cmd_again:
   err = send(nftfd, cmdbuf, cmdsz, 0);
@@ -307,7 +316,40 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
   } else
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Commands submitted");
 
-  return 0;
+ recv_again:
+  respsz = recv(nftfd, respbuf, sizeof(respbuf), 0);
+  if ( respsz == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "NFTables thread exited");
+    exit(EXIT_FAILURE);
+  } else if ( respsz < 0 ) {
+    if ( errno == EINTR || errno == EAGAIN ) goto recv_again;
+    else {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not receive NFTables output: %s", strerror(errno));
+      return -1;
+    }
+  } else if ( respsz < sizeof(status) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Not enough data returned, needed %zu, got %zd",
+                 sizeof(status), respsz);
+    exit(EXIT_FAILURE);
+  }
+
+  memcpy(&status, respbuf, sizeof(status));
+  respsz -= sizeof(status);
+  memcpy(respbuf, respbuf + sizeof(status), respsz);
+
+  CLUSTERD_LOG(CLUSTERD_INFO, "Got NFTables response (%s) %.*s", status == 0 ? "success" : "error",
+               (unsigned int) respsz, respbuf);
+
+  if ( status != 0 ) {
+    ret = -1;
+  }
+
+  if ( pthread_mutex_unlock(&g_nft_mutex) ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unlock nft mutex");
+      exit(EXIT_FAILURE);
+  }
+
+  return ret;
 
 }
 
@@ -913,6 +955,7 @@ static int nft_worker(int workfd, struct nft_ctx *nft) {
     char cmdbuf[16 * 1024];
     ssize_t cmdsz = recv(workfd, cmdbuf, sizeof(cmdbuf), 0);
 
+
     if ( cmdsz < 0 ) {
       if ( errno == EINTR ) continue;
       else if ( errno == EPIPE || errno == ENOTCONN ) return 0;
@@ -921,10 +964,55 @@ static int nft_worker(int workfd, struct nft_ctx *nft) {
       }
     } else if ( cmdsz == 0 ) return 0;
     else {
+      int status = 0;
+      struct iovec respv[2] = {
+        { .iov_base = &status, .iov_len = sizeof(status) },
+        { .iov_base = NULL, .iov_len = 0 }
+      };
+      struct msghdr msg;
+
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Running command %.*s", (int) cmdsz, cmdbuf);
 
-      nft_run_cmd_from_buffer(nft, cmdbuf);
-      // TODO error reporting
+      err = nft_ctx_buffer_output(nft);
+      if ( err != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable nft buffering");
+        goto respond_error;
+      }
+
+      err = nft_run_cmd_from_buffer(nft, cmdbuf);
+      if ( err != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Could not run command %s", cmdbuf);
+        goto respond_error;
+      }
+
+      status = 0;
+      respv[1].iov_base = (void *) nft_ctx_get_output_buffer(nft);
+
+      goto respond;
+
+    respond_error:
+      status = 1;
+      respv[1].iov_base = (void *) nft_ctx_get_error_buffer(nft);
+
+    respond:
+      respv[1].iov_len = strlen(respv[1].iov_base);
+
+      msg.msg_name = NULL;
+      msg.msg_namelen = 0;
+      msg.msg_iov = respv;
+      msg.msg_iovlen = 2;
+      msg.msg_control = NULL;
+      msg.msg_controllen = 0;
+      msg.msg_flags = 0;
+
+      err = sendmsg(workfd, &msg, 0);
+      if ( err == 0 ) {
+        CLUSTERD_LOG(CLUSTERD_INFO, "Main worker process exited, not returning nftables response");
+        exit(EXIT_SUCCESS);
+      } else if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Could not return response to worker: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+      }
     }
   }
 }
@@ -1010,6 +1098,11 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable nftables buffering output in worker");
       goto report_error;
     }
+
+    // Ask for the handle to be output
+    nft_ctx_output_set_flags(nft,
+                             NFT_CTX_OUTPUT_HANDLE | NFT_CTX_OUTPUT_JSON |
+                             NFT_CTX_OUTPUT_ECHO | NFT_CTX_OUTPUT_NUMERIC_ALL);
 
     // Now attempt to open the netlink socket
 
@@ -1127,6 +1220,12 @@ static int start_threads(int thcnt, int nftfd) {
   int i, n = 0, err;
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting %d thread(s) for thread pool", thcnt);
+
+  err = pthread_mutex_init(&g_nft_mutex, NULL);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create NFTables mutex: %s", strerror(errno));
+    return -1;
+  }
 
   err = pthread_mutex_init(&g_endpoint_mutex, NULL);
   if ( err != 0 ) {
