@@ -335,7 +335,7 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
 
   memcpy(&status, respbuf, sizeof(status));
   respsz -= sizeof(status);
-  memcpy(respbuf, respbuf + sizeof(status), respsz);
+  memmove(respbuf, respbuf + sizeof(status), respsz);
 
   CLUSTERD_LOG(CLUSTERD_INFO, "Got NFTables response (%s, size %ld) %.*s", status == 0 ? "success" : "error",
                respsz, (unsigned int) respsz, respbuf);
