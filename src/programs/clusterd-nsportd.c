@@ -165,12 +165,6 @@ static int flush_tables(const char *tblname) {
     return -1;
   }
 
-  err = nft_ctx_buffer_output(nft);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable buffering output");
-    goto done;
-  }
-
   err = snprintf(cmdbuf, sizeof(cmdbuf), "delete table inet %s", tblname);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
 
@@ -988,12 +982,6 @@ static int nft_worker(int workfd, struct nft_ctx *nft) {
       status = 0;
       respv[1].iov_base = (void *) nft_ctx_get_output_buffer(nft);
 
-      err = nft_ctx_unbuffer_output(nft);
-      if ( err != 0 ) {
-        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not flush nft buffer");
-        goto respond_error;
-      }
-
       goto respond;
 
     respond_error:
@@ -1097,6 +1085,18 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
     nft = nft_ctx_new(NFT_CTX_DEFAULT);
     if ( ! nft ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create nftables context in worker: %s", strerror(errno));
+      goto report_error;
+    }
+
+    err = nft_ctx_buffer_output(nft);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable buffering output in worker");
+      goto report_error;
+    }
+
+    err = nft_ctx_buffer_error(nft);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable error buffering in worker");
       goto report_error;
     }
 
