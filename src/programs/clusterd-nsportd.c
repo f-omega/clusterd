@@ -178,7 +178,7 @@ static int flush_tables(const char *tblname) {
   err = snprintf(cmdbuf, sizeof(cmdbuf), "add table inet %s {\n"
                  "set clusterd-endpoints { type ipv6_addr; flags timeout; }\n"
                  "chain NAT {\n"
-                 "  type nat hook prerouting priority 0; policy drop;\n"
+                 "  type nat hook prerouting priority 0; policy accept;\n"
                  "  ip6 daddr != @clusterd-endpoints ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
                  "}\n"
                  "}\n", tblname, CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num);
