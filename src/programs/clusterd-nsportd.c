@@ -988,6 +988,12 @@ static int nft_worker(int workfd, struct nft_ctx *nft) {
       status = 0;
       respv[1].iov_base = (void *) nft_ctx_get_output_buffer(nft);
 
+      err = nft_ctx_unbuffer_output(nft);
+      if ( err != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not flush nft buffer");
+        goto respond_error;
+      }
+
       goto respond;
 
     respond_error:
@@ -1093,16 +1099,9 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
       goto report_error;
     }
 
-    err = nft_ctx_buffer_output(nft);
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not enable nftables buffering output in worker");
-      goto report_error;
-    }
-
     // Ask for the handle to be output
     nft_ctx_output_set_flags(nft,
-                             NFT_CTX_OUTPUT_HANDLE | NFT_CTX_OUTPUT_JSON |
-                             NFT_CTX_OUTPUT_ECHO | NFT_CTX_OUTPUT_NUMERIC_ALL);
+                             NFT_CTX_OUTPUT_HANDLE | NFT_CTX_OUTPUT_ECHO | NFT_CTX_OUTPUT_NUMERIC_ALL);
 
     // Now attempt to open the netlink socket
 
