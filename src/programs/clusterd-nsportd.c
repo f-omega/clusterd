@@ -180,12 +180,12 @@ static int flush_tables(const char *tblname) {
                  "counter ip6_pkts { }\n"
                  "counter ip6_net_pkts {} \n"
                  "chain FORWARD {\n"
-                 "  type filter hook forward priority filter; policy accept;\n"
+                 "  type filter hook prerouting priority -100; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter name ip6_net_pkts queue num %d;\n"
                  "}\n"
                  "chain NAT {\n"
-                 "  type nat hook prerouting priority filter; policy drop;\n"
+                 "  type nat hook prerouting priority 0; policy drop;\n"
                  "}\n"
                  "}\n", tblname, CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
@@ -666,10 +666,11 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
           verdict = NF_ACCEPT;
         else {
           if ( enqueue_packet(id, epid, ntohs(tcp.dest), IPPROTO_TCP) == 0 ) {
-            CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not enqueue TCP packet: %s", strerror(errno));
             verdict = -1;
-          } else
+          } else {
+            CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not enqueue TCP packet: %s", strerror(errno));
             verdict = NF_DROP;
+          }
         }
 	break;
 
