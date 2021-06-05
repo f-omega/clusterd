@@ -350,7 +350,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   RESET_BUFFER();
   if ( pscnt > 1 ) {
-    WRITE_BUFFER("add rule inet %s NAT ip6 daddr %s dnat ip6 to random mod %d map {",
+    WRITE_BUFFER("add rule inet %s NAT ip6 daddr %s dnat ip6 to jhash ip6 saddr . tcp sport mod %d map {",
                  g_table_name, endpointaddr, pscnt);
     for ( i = 0; i < pscnt; ++i ) {
       WRITE_BUFFER("%s%d: %s", i == 0 ? "" : ", ",  i, processes[i]);
