@@ -569,6 +569,8 @@ static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t por
     next_packet->proto = proto;
     next_packet->port = port;
 
+    next_packet->next = NULL;
+
     if ( pthread_cond_signal(&g_packet_queue_cond) != 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Added packet to queue but could not wake any threads");
       ret = -1;
