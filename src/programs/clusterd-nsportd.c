@@ -337,8 +337,8 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
   respsz -= sizeof(status);
   memcpy(respbuf, respbuf + sizeof(status), respsz);
 
-  CLUSTERD_LOG(CLUSTERD_INFO, "Got NFTables response (%s) %.*s", status == 0 ? "success" : "error",
-               (unsigned int) respsz, respbuf);
+  CLUSTERD_LOG(CLUSTERD_INFO, "Got NFTables response (%s, size %ld) %.*s", status == 0 ? "success" : "error",
+               respsz, (unsigned int) respsz, respbuf);
 
   if ( status != 0 ) {
     ret = -1;
@@ -1002,6 +1002,7 @@ static int nft_worker(int workfd, struct nft_ctx *nft) {
 
     respond:
       respv[1].iov_len = strlen(respv[1].iov_base);
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got output of size %ld", respv[1].iov_len);
 
       msg.msg_name = NULL;
       msg.msg_namelen = 0;
