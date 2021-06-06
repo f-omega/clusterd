@@ -1102,7 +1102,7 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
 
     // Ask for the handle to be output
     nft_ctx_output_set_flags(nft,
-                             NFT_CTX_OUTPUT_HANDLE | NFT_CTX_OUTPUT_JSON);
+                             NFT_CTX_OUTPUT_HANDLE | NFT_CTX_OUTPUT_ECHO);
 
     // Now attempt to open the netlink socket
 
