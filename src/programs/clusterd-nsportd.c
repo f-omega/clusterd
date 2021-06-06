@@ -33,6 +33,7 @@
 #include <byteswap.h>
 #include <fcntl.h>
 #include <uthash.h>
+#include <regex.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -106,6 +107,8 @@ static pthread_mutex_t g_nft_mutex;
 
 static pthread_mutex_t g_endpoint_mutex;
 struct mapped_endpoint *g_endpoints = NULL;
+
+static regex_t g_nft_handle_re;
 
 static int send_verdict(uint32_t pkt_id, int verdict);
 static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t port, int proto);
@@ -281,12 +284,31 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
   }
 }
 
-static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
+static int init_nft_command() {
+  int err;
+
+  err = regcomp(&g_nft_handle_re, "# handle \\([0-9]+\\)$", 0);
+  if ( err != 0 ) {
+    char errbuf[2048];
+    size_t errsz;
+
+    errsz = regerror(err, &g_nft_handle_re, errbuf, sizeof(errbuf));
+
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not compile NFT handle regex: %.*s", (unsigned int)errsz, errbuf);
+    return -1;
+  }
+
+  return 0;
+}
+
+static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_handle) {
   int err, status, ret = 0;
   char respbuf[8192];
   ssize_t respsz;
 
   cmdsz ++; // Include nul byte
+
+  if ( rule_handle ) *rule_handle = -1;
 
   if ( pthread_mutex_lock(&g_nft_mutex) != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lock nft mutex");
@@ -328,16 +350,39 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
   }
 
   memcpy(&status, respbuf, sizeof(status));
-  respsz -= sizeof(status);
-  memmove(respbuf, respbuf + sizeof(status), respsz);
 
   CLUSTERD_LOG(CLUSTERD_INFO, "Got NFTables response (%s, size %ld) %.*s", status == 0 ? "success" : "error",
-               respsz, (unsigned int) respsz, respbuf);
+               respsz - sizeof(status), (int) (respsz - sizeof(status)), respbuf + sizeof(status));
+
+  if ( rule_handle ) {
+    regmatch_t matches[2];
+
+    // NUL-terminate respbuf
+    if ( respsz >= sizeof(respbuf) )
+      respsz = sizeof(respbuf) - 1;
+
+    respbuf[respsz] = '\0';
+
+    err = regexec(&g_nft_handle_re, respbuf, 2, matches, 0);
+    if ( err == 0 &&
+         matches[1].rm_so != -1 ) {
+      unsigned int hdl;
+
+      // Got a handle
+      respbuf[matches[1].rm_eo] = '\0'; // NUL-terminate number
+      err = sscanf(respbuf + matches[1].rm_so, "%u", &hdl);
+      if ( err == 1 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule handle %u", hdl);
+        *rule_handle = hdl;
+      }
+    }
+  }
 
   if ( status != 0 ) {
     ret = -1;
   }
 
+ done:
   if ( pthread_mutex_unlock(&g_nft_mutex) ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unlock nft mutex");
       exit(EXIT_FAILURE);
@@ -350,7 +395,7 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz) {
 static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
   char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
-  int err, cmdpos, pscnt, i;
+  int err, cmdpos, pscnt, i, natrulehdl;
 
   const char *processes[128];
 
@@ -398,7 +443,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
                  g_table_name, endpointaddr, processes[0]);
   }
 
-  if ( run_nft_command(nftfd, cmdbuf, cmdpos) < 0 ) {
+  if ( run_nft_command(nftfd, cmdbuf, cmdpos, &natrulehdl) < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add nftables rule: %s", strerror(errno));
     return -1;
   }
@@ -407,7 +452,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   // Add endpoint address to the set
   WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout %ds }\n", g_table_name, endpointaddr, RULE_TTL_SECONDS);
 
-  if ( run_nft_command(nftfd, cmdbuf, cmdpos) < 0 ) {
+  if ( run_nft_command(nftfd, cmdbuf, cmdpos, NULL) < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add endpoint to endpoint set: %s", strerror(errno));
     return -1;
   }
@@ -1309,6 +1354,12 @@ int main (int argc, char *const *argv) {
 
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
+
+  err = init_nft_command();
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not initialize nft regex");
+    return 1;
+  }
 
   while ( (c = getopt(argc, argv, "t:q:n:l:N:s:vh")) != -1 ) {
     switch ( c ) {
