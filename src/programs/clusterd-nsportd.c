@@ -363,7 +363,7 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_h
 
     respbuf[respsz] = '\0';
 
-    err = regexec(&g_nft_handle_re, respbuf, 2, matches, 0);
+    err = regexec(&g_nft_handle_re, respbuf + sizeof(status), 2, matches, 0);
     if ( err == 0 &&
          matches[1].rm_so != -1 ) {
       unsigned int hdl;
