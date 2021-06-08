@@ -287,7 +287,7 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
 static int init_nft_command() {
   int err;
 
-  err = regcomp(&g_nft_handle_re, "# handle \\([0-9]\\+\\)$", 0);
+  err = regcomp(&g_nft_handle_re, "# handle \\([0-9]\\+\\)", 0);
   if ( err != 0 ) {
     char errbuf[2048];
     size_t errsz;
