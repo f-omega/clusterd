@@ -243,7 +243,7 @@ static int endpoint_exists(clusterd_endpoint_t epid) {
 
 // If the endpoint was previously added, even if it was expired, this function removes it
 static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
-  struct mapped_endpoint *ep;
+  struct mapped_endpoint *ep = NULL;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete endpoint " EP_F ": could not lock mutex", epid);
@@ -254,7 +254,6 @@ static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
   if ( ep ) {
     // Delete the rule
     HASH_DEL(g_endpoints, ep);
-  } else {
   }
 
   if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
@@ -316,7 +315,7 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int *rulehdl) 
   }
 
   if ( rulehdl ) {
-    ep->rule_handle = *rulehdl;
+    *rulehdl = ep->rule_handle;
   }
 
  done:
