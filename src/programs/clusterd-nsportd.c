@@ -370,11 +370,11 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_h
 
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule handle %.*s",
                    (int) (matches[1].rm_eo - matches[1].rm_so),
-                   respbuf + matches[1].rm_so);
+                   respbuf + sizeof(status) + matches[1].rm_so);
 
       // Got a handle
-      respbuf[matches[1].rm_eo] = '\0'; // NUL-terminate number
-      err = sscanf(respbuf + matches[1].rm_so, "%u", &hdl);
+      respbuf[sizeof(status) + matches[1].rm_eo] = '\0'; // NUL-terminate number
+      err = sscanf(respbuf + sizeof(status) + matches[1].rm_so, "%u", &hdl);
       if ( err == 1 ) {
         CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule handle %u", hdl);
         *rule_handle = hdl;
