@@ -1373,11 +1373,9 @@ int main (int argc, char *const *argv) {
   unsigned int portid;
   sigset_t mask;
 
-  err = sigfillset(&mask);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fill mask: %s", strerror(errno));
-    return 1;
-  }
+  struct sigaction term_action, hup_action;
+
+  sigfillset(&mask);
 
   err = sigprocmask(SIG_BLOCK, &mask, NULL);
   if ( err < 0 ) {
@@ -1385,27 +1383,23 @@ int main (int argc, char *const *argv) {
     return 1;
   }
 
-  err = sigdelset(&mask, SIGINT);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unblock SIGINT: %s", strerror(errno));
-    return 1;
-  }
+  sigemptyset(&mask);
 
-  err = sigdelset(&mask, SIGTERM);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unblock SIGTERM: %s", strerror(errno));
-    return 1;
-  }
+  sigaddset(&mask, SIGINT);
+  sigaddset(&mask, SIGTERM);
+  sigaddset(&mask, SIGHUP);
 
-  err = sigdelset(&mask, SIGHUP);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unblock SIGHUP: %s", strerror(errno));
-    return 1;
-  }
+  term_action.sa_handler = term_handler;
+  hup_action.sa_handler = hup_handler;
+  sigfillset(&term_action.sa_mask);
+  sigfillset(&hup_action.sa_mask);
+  term_action.sa_flags = 0;
+  hup_action.sa_flags = 0;
 
-  signal(SIGTERM, term_handler);
-  signal(SIGINT, term_handler);
-  signal(SIGHUP, hup_handler);
+  sigaction(SIGTERM, &term_action, NULL);
+  sigaction(SIGTERM, &term_action, NULL);
+
+  sigaction(SIGHUP, &hup_action, NULL);
 
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
@@ -1531,7 +1525,7 @@ int main (int argc, char *const *argv) {
     return 1;
   }
 
-  err = sigprocmask(SIG_SETMASK, &mask, NULL);
+  err = sigprocmask(SIG_UNBLOCK, &mask, NULL);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set signal mask: %s", strerror(errno));
     return 1;
