@@ -478,7 +478,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   RESET_BUFFER();
   if ( oldrulehdl >= 0 ) {
-    WRITE_BUFFER("replace rule inet %s NAT position %d ", g_table_name, oldrulehdl);
+    WRITE_BUFFER("replace rule inet %s NAT handle %d ", g_table_name, oldrulehdl);
   } else {
     WRITE_BUFFER("add rule inet %s NAT ", g_table_name);
   }
