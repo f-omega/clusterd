@@ -283,7 +283,7 @@ static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
 
 // This function ensures that the mapped_endpoint record for this
 // endpoint is up-to-date (time is updated)
-static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int *rulehdl) {
+static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int newrulehdl, int *oldrulehdl) {
   struct mapped_endpoint *ep;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
@@ -314,9 +314,11 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int *rulehdl) 
     ep->ttl = ttl_ms;
   }
 
-  if ( rulehdl ) {
-    *rulehdl = ep->rule_handle;
-  }
+  if ( oldrulehdl )
+    *oldrulehdl = ep->rule_handle;
+
+  if ( newrulehdl >= 0 )
+    ep->rule_handle = newrulehdl;
 
  done:
   if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
@@ -443,7 +445,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   const char *processes[128];
 
-  update_endpoint(epid, RULE_TTL_SECONDS * 1000, &oldrulehdl);
+  update_endpoint(epid, RULE_TTL_SECONDS * 1000, -1, &oldrulehdl);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule for epid=" EP_F ", proto=%d, port=%u:\n%s",
 	       epid, proto, port, rulebuf);
@@ -507,7 +509,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
     return -1;
   }
 
-  update_endpoint(epid, -1, &natrulehdl);
+  update_endpoint(epid, -1, natrulehdl, NULL);
 
   return 0;
 
