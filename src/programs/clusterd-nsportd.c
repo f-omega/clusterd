@@ -80,7 +80,7 @@ struct pending_packet {
 struct mapped_endpoint {
   clusterd_endpoint_t endpoint_id;
   struct timespec last_updated;
-  int ttl;
+  int ttl, rule_handle;
 
   UT_hash_handle hh;
 };
@@ -114,6 +114,7 @@ static int send_verdict(uint32_t pkt_id, int verdict);
 static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t port, int proto);
 static void free_packet(struct pending_packet *pkt);
 static int flush_tables(const char *tblname);
+static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_handle);
 
 // Basic operation... read packets from queue. a new packet means a
 // port that wasn't handled, so make that port work by looking it up
@@ -228,16 +229,8 @@ static int endpoint_exists(clusterd_endpoint_t epid) {
     memcpy(&expiry, &ep->last_updated, sizeof(struct timespec));
     timespec_add_ms(&expiry, ep->ttl);
 
-    if ( timespec_cmp(&expiry, &now) <= 0 ) {
-      // Endpoint is expired
-      HASH_DEL(g_endpoints, ep);
-
-      // TODO we ought to remove the rule too
-      CLUSTERD_LOG(CLUSTERD_INFO, "TODO endpoint is expired. Should remove stale rule");
-
-      free(ep);
-      ep = NULL;
-    }
+    if ( timespec_cmp(&expiry, &now) <= 0 )
+      ep = NULL; // Not found
   }
 
  done:
@@ -248,9 +241,50 @@ static int endpoint_exists(clusterd_endpoint_t epid) {
   return (ep != NULL);
 }
 
+// If the endpoint was previously added, even if it was expired, this function removes it
+static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
+  struct mapped_endpoint *ep;
+
+  if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete endpoint " EP_F ": could not lock mutex", epid);
+    return;
+  }
+
+  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  if ( ep ) {
+    // Delete the rule
+    HASH_DEL(g_endpoints, ep);
+  } else {
+  }
+
+  if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete endpoint " EP_F ": could not unlock mutex", epid);
+  }
+
+  if ( ep && ep->rule_handle >= 0 ) {
+    // Run the NFTables command to delete the rule
+    char cmdbuf[2048];
+    size_t cmdsz;
+    int err;
+
+    cmdsz = snprintf(cmdbuf, sizeof(cmdbuf), "delete rule inet %s NAT handle %d",
+                     g_table_name, ep->rule_handle);
+    if ( cmdsz >= sizeof(cmdbuf) ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete rule %d: buffer overrun", ep->rule_handle);
+    } else {
+      err = run_nft_command(nftfd, cmdbuf, cmdsz, NULL);
+      if ( err != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete rule %d: %s", ep->rule_handle, strerror(errno));
+      }
+    }
+
+    free(ep);
+  }
+}
+
 // This function ensures that the mapped_endpoint record for this
 // endpoint is up-to-date (time is updated)
-static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
+static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int *rulehdl) {
   struct mapped_endpoint *ep;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
@@ -267,6 +301,7 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
     }
 
     ep->endpoint_id = epid;
+    ep->rule_handle = -1; // Invalid for now until the rule is added
     HASH_ADD(hh, g_endpoints, endpoint_id, sizeof(ep->endpoint_id), ep);
   }
 
@@ -276,7 +311,13 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms) {
     goto done;
   }
 
-  ep->ttl = ttl_ms;
+  if ( ttl_ms >= 0 ) {
+    ep->ttl = ttl_ms;
+  }
+
+  if ( rulehdl ) {
+    ep->rule_handle = *rulehdl;
+  }
 
  done:
   if ( pthread_mutex_unlock(&g_endpoint_mutex) != 0 ) {
@@ -368,7 +409,7 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_h
          matches[1].rm_so != -1 ) {
       unsigned int hdl;
 
-      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule handle %.*s",
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got raw rule handle %.*s",
                    (int) (matches[1].rm_eo - matches[1].rm_so),
                    respbuf + sizeof(status) + matches[1].rm_so);
 
@@ -399,11 +440,11 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_h
 static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
   char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
-  int err, cmdpos, pscnt, i, natrulehdl;
+  int err, cmdpos, pscnt, i, natrulehdl, oldrulehdl = -1;
 
   const char *processes[128];
 
-  update_endpoint(epid, RULE_TTL_SECONDS * 1000);
+  update_endpoint(epid, RULE_TTL_SECONDS * 1000, &oldrulehdl);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule for epid=" EP_F ", proto=%d, port=%u:\n%s",
 	       epid, proto, port, rulebuf);
@@ -435,16 +476,22 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 #define RESET_BUFFER() cmdpos = 0
 
   RESET_BUFFER();
+  if ( oldrulehdl >= 0 ) {
+    WRITE_BUFFER("replace rule inet %s NAT position %d ", g_table_name, oldrulehdl);
+  } else {
+    WRITE_BUFFER("add rule inet %s NAT ", g_table_name);
+  }
+
   if ( pscnt > 1 ) {
-    WRITE_BUFFER("add rule inet %s NAT ip6 daddr %s dnat ip6 to jhash ip6 saddr . tcp sport mod %d map {",
-                 g_table_name, endpointaddr, pscnt);
+    WRITE_BUFFER("ip6 daddr %s dnat ip6 to jhash ip6 saddr . tcp sport mod %d map {",
+                 endpointaddr, pscnt);
     for ( i = 0; i < pscnt; ++i ) {
       WRITE_BUFFER("%s%d: %s", i == 0 ? "" : ", ",  i, processes[i]);
     }
     WRITE_BUFFER("}\n");
   } else {
-    WRITE_BUFFER("add rule inet %s NAT ip6 daddr %s dnat ip6 to %s\n",
-                 g_table_name, endpointaddr, processes[0]);
+    WRITE_BUFFER("ip6 daddr %s dnat ip6 to %s\n",
+                 endpointaddr, processes[0]);
   }
 
   if ( run_nft_command(nftfd, cmdbuf, cmdpos, &natrulehdl) < 0 ) {
@@ -460,6 +507,8 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add endpoint to endpoint set: %s", strerror(errno));
     return -1;
   }
+
+  update_endpoint(epid, -1, &natrulehdl);
 
   return 0;
 
@@ -535,6 +584,7 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup rule (ns=" NS_F ", endpoint=" EP_F ", proto=%s, port=%u)",
 		 g_nsid, epid, protostr, port);
+    delete_endpoint(nftfd, epid);
     return -1;
   }
 
