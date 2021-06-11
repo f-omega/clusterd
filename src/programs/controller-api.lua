@@ -144,15 +144,14 @@ end
 
 function clusterd.list_resource_class()
    ds, err = api.run(
-      [[SELECT resource_class(rc_name, rc_fungible, rc_description
+      [[SELECT rc_name AS name, rc_fungible AS fungible, rc_description AS description,
+               rc_quantifiable AS quantifiable, rc_parent AS parent
         FROM resource_class]]
    )
    if err ~= nil then
       error("Could not get resource class: " .. err)
    else
-      for _, rc in ipairs(ds) do
-         output(rc_to_json(rc))
-      end
+      return ds
    end
 end
 
@@ -160,7 +159,8 @@ function clusterd.get_resource_class(nm)
    assert(type(nm) == "string", "resource class name must be a string")
 
    ds, err = api.run(
-      [[SELECT resource_class(rc_name, rc_fungible, rc_description)
+      [[SELECT rc_name AS name, rc_fungible AS fungible, rc_description AS description,
+               rc_quantifiable AS quantifiable, rc_parent AS parent
         FROM resource_class WHERE rc_name=$name]],
       { name = nm }
    )
@@ -169,7 +169,7 @@ function clusterd.get_resource_class(nm)
    else
       if #ds == 1 then
          rc = ds[1]
-         output(rc_to_json(rc))
+         return rc
       end
    end
 end
@@ -265,8 +265,97 @@ function clusterd.delete_node(node_id)
    end
 end
 
-function clusterd.list_nodes()
-   res, err = api.run([[SELECT ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node]])
+function clusterd.list_nodes(opts)
+   if opts == nil then
+      opts = {}
+   end
+
+   if opts.limits == nil then
+      opts.limits = {}
+   end
+
+   if opts.resource_constraints == nil then
+      opts.resource_constraints = {}
+   end
+
+   qargs = {}
+   qextra = ""
+   qextraproj = ""
+
+   for i, limit in ipairs(opts.limits) do
+     assert(limit.resource ~= nil and type(limit.resource) == "string",
+           "Each limit must specify a resource class as a string")
+
+     resource_class = clusterd.get_resource_class(limit.resource)
+     if resource_class == nil then
+       error("resource type " .. limit.resource .. " does not exist")
+     end
+
+     limitkey = "limitname" .. tostring(i)
+     qargs[limitkey] = limit.resource
+
+     if limit.required then
+       qextra = qextra .. " JOIN"
+     else
+       qextra = qextra .. " LEFT JOIN"
+     end
+     qextra = qextra .. " node_resource " .. limitkey .. " ON " .. limitkey .. ".nrc_node = n_id AND " ..
+                 limitkey .. ".nrc_name = $" .. limitkey
+
+     if limit.quantity then
+       assert(type(limit.quantity) == "number", "limit quantity must be a number")
+       if limit.quantity > 0 then
+         assert(resource_class.quantifiable, "resource class " .. limit.resource .. " is not quantifiable, but a quantity was given")
+         qextra = qextra .. " AND " .. limitkey .. ".nrc_amount >= $" .. limitkey .. "qty"
+         qargs[limitkey .. "qty"] = limit.quantity
+       end
+     end
+
+     qextraproj = qextraproj .. ", " .. limitkey .. ".nrc_amount AS avail_" .. limit.resource
+   end
+
+   for i, resource in ipairs(opts.resource_constraints) do
+     assert(resource.resource ~= nil and type(resource.resource) == "string",
+            "Resource affinity requests must have a resource name that is a string")
+     namespace = resource.namespace
+     if namespace == nil then
+       namespace = opts.namespace
+     end
+
+     assert(namespace ~= nil, "No namespace provided for resource " .. resource.resource)
+     if resource.relation == nil then
+       resource.relation = "default"
+     end
+
+     assert(type(resource.relation) == "string", "Resource relation must be a string for resource " .. resource.resource)
+
+     nsid = clusterd.resolve_namespace(namespace)
+     if nsid == nil then
+       error("namespace " .. tostring(namespace) .. " does not exist")
+     end
+
+     resource = clusterd.get_global_resource(namespace, resource.resource)
+     if resource == nil then
+       error('global resource ' .. resource.resource .. ' does not exist in namespace ' .. resource.namespace)
+     end
+
+     if resource.invert then
+       error('TODO inverse resource affinity not implemented')
+     end
+
+     qextra = qextra .. " JOIN global_resource_assignment " .. resourcename .. " ON " ..
+                resourcename .. ".gra_resource = $" .. resourcename .. " AND " ..
+                resourcename .. ".gra_node = n_id AND " ..
+                resourcename .. ".gra_rel = $" .. resourcename .. "rel"
+     qargs[resourcename] = resourcename
+     qargs[resourcename .. "rel"] = resource.relation
+   end
+
+   res, err = api.run(
+      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip]] .. qextraproj ..
+      [[ FROM node]] .. qextra,
+      qargs
+   )
    if err ~= nil then
       error("Could not get nodes: " .. err)
    end
@@ -276,7 +365,7 @@ end
 
 function clusterd.get_node(nid)
    res, err = api.run(
-      [[SELECT ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node WHERE n_id=$id]],
+      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node WHERE n_id=$id]],
       { id = nid }
    )
    if err ~= nil then

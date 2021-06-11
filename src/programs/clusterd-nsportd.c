@@ -941,7 +941,7 @@ static int lookup_namespace(const char *ns) {
 static void usage() {
   fprintf(stderr, "clusterd-nsportd -- manage an on-demand clusterd namespace port mapping using netfilter\n");
   fprintf(stderr, "Usage: clusterd-nsportd -vh [-t TABLE] [-N THCNT] [-l QLEN] -s NSFILE -q QUEUENUM\n");
-  fprintf(stderr, "         -n NAMESPACE\n");
+  fprintf(stderr, "         -n NAMESPACE\n\n");
   fprintf(stderr, "   -t TABLE     The netfilter table that contains the TCP and UDP port maps\n");
   fprintf(stderr, "   -l QLEN      Number of packets that can be enqueued at the same time (100 by default)\n");
   fprintf(stderr, "   -n NAMESPACE Namespace to use to lookup queries\n");

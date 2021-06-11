@@ -12,6 +12,7 @@ pkg_check_modules(RAFT REQUIRED raft)
 pkg_check_modules(NETFILTER_QUEUE REQUIRED libnetfilter_queue)
 pkg_check_modules(MNL REQUIRED libmnl)
 pkg_check_modules(NFTABLES REQUIRED libnftables)
+pkg_check_modules(JANSSON REQUIRED jansson)
 
 find_package(Lua REQUIRED)
 find_package(SQLite3 REQUIRED)
@@ -41,7 +42,7 @@ set(CLUSTERD_CFLAGS ${LIBUV_CFLAGS} ${RAFT_CFLAGS} ${NETFILTER_QUEUE_CFLAGS} ${M
 add_compile_options(${CLUSTERD_CFLAGS})
 
 include_directories(PRIVATE src/include)
-include_directories(PUBLIC ${LUA_INCLUDE_DIR} ${SQLite3_INCLUDE_DIRS} ${NFTABLES_INCLUDE_DIRS})
+include_directories(PUBLIC ${LUA_INCLUDE_DIR} ${SQLite3_INCLUDE_DIRS} ${NFTABLES_INCLUDE_DIRS} ${JANSSON_INCLUDE_DIRS})
 add_executable(clusterd-monitor src/programs/clusterd-monitor.c)
 target_link_libraries(clusterd-monitor ${LIBUV_LIBRARIES})
 
@@ -81,3 +82,5 @@ target_link_libraries(clusterd-resource clusterctllib)
 add_executable(clusterd-nsportd src/programs/clusterd-nsportd.c)
 target_link_libraries(clusterd-nsportd clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${NETFILTER_QUEUE_LIBRARIES} ${MNL_LIBRARIES} ${NFTABLES_LIBRARIES})
 
+add_executable(clusterd-schedule src/programs/clusterd-schedule.c)
+target_link_libraries(clusterd-schedule clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${JANSSON_LIBRARIES})
