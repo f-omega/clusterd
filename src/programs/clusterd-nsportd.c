@@ -948,6 +948,7 @@ static void usage() {
   fprintf(stderr, "   -N THCNT     Number of threads that run to serve packet requests\n");
   fprintf(stderr, "   -s NSFILE    Name of network namespace file\n");
   fprintf(stderr, "   -q QUEUENUM  The netfilter queue which receives traffic for unknown TCP/UDP ports\n");
+  fprintf(stderr, "   -d           Daemonize after starting\n");
   fprintf(stderr, "   -v           Show verbose debug output\n");
   fprintf(stderr, "   -h           Show this help message\n\n");
   fprintf(stderr, "The TCP and UDP netfilter maps should be declared as such:\n");
@@ -1368,8 +1369,72 @@ static int start_threads(int thcnt, int nftfd) {
   return 0;
 }
 
+static void setup_daemon() {
+  pid_t child, sessid, grandchild;
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not daemonize: %s", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  if ( child == 0 ) {
+    // We are the child
+    sessid = setsid();
+    if ( sessid < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not create session: %s", strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+
+    grandchild = fork();
+    if ( grandchild < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not create grandchild: %s", strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+
+    if ( grandchild == 0 ) {
+      // Reset stdin/stdout/stderr
+      int nullfd, err;
+
+      nullfd = open("/dev/null", O_RDONLY);
+      if ( nullfd < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot redirect stdin, could not open /dev/null: %s", strerror(errno));
+      } else {
+        err = dup2(nullfd, STDIN_FILENO);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Could not redirect stdin: %s", strerror(errno));
+        }
+
+        close(nullfd);
+      }
+
+      nullfd = open("/dev/null", O_WRONLY);
+      if ( nullfd < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot redirect stdout, could not open /dev/null: %s", strerror(errno));
+      } else {
+        err = dup2(nullfd, STDOUT_FILENO);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Could not redirect stdout: %s", strerror(errno));
+        }
+
+        err = dup2(nullfd, STDERR_FILENO);
+        if ( err < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Could not redirect stderr: %s", strerror(errno));
+        }
+
+        close(nullfd);
+      }
+
+      return; // Only the grand child survives
+    } else exit(EXIT_SUCCESS); // Let the child die
+  } else {
+    CLUSTERD_LOG(CLUSTERD_INFO, "Going into background");
+    exit(EXIT_SUCCESS);
+  }
+}
+
 int main (int argc, char *const *argv) {
-  int c, err, pktlen = 100, thcnt = -1, nftfd;
+  int c, err, pktlen = 100, thcnt = -1, nftfd, daemonize = 0;
   const char *ns_file = NULL, *namespace = "default";
   struct mnl_socket *nl;
   unsigned int portid;
@@ -1412,7 +1477,7 @@ int main (int argc, char *const *argv) {
     return 1;
   }
 
-  while ( (c = getopt(argc, argv, "t:q:n:l:N:s:vh")) != -1 ) {
+  while ( (c = getopt(argc, argv, "t:q:n:l:N:s:vhd")) != -1 ) {
     switch ( c ) {
     case 't':
       g_table_name = optarg;
@@ -1465,6 +1530,10 @@ int main (int argc, char *const *argv) {
       }
       break;
 
+    case 'd':
+      daemonize = 1;
+      break;
+
     case 'v':
       CLUSTERD_LOG_LEVEL = CLUSTERD_DEBUG;
       break;
@@ -1515,15 +1584,18 @@ int main (int argc, char *const *argv) {
     return 1;
   }
 
-  g_netlink_socket = nl = start_ns_helper(ns_file, &nftfd);
-  if ( !nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open netfilter socket: %s", strerror(errno));
-    return 1;
-  }
+  if ( daemonize )
+    setup_daemon();
 
   err = start_threads(thcnt, nftfd);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not start threads: %s", strerror(errno));
+    return 1;
+  }
+
+  g_netlink_socket = nl = start_ns_helper(ns_file, &nftfd);
+  if ( !nl ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open netfilter socket: %s", strerror(errno));
     return 1;
   }
 
