@@ -1121,11 +1121,13 @@ static int reset_child_streams() {
     return -1;
   }
 
-  err = dup2(STDIN_FILENO, nullfd);
+  err = dup2(nullfd, STDIN_FILENO);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not redirect stdin to /dev/null: %s", strerror(errno));
     return -1;
   }
+
+  close(nullfd);
 
   return 0;
 }

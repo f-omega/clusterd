@@ -2192,5 +2192,7 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not remove process from controller. TODO we should wait around until the process can be removed or until another SIGTERM");
   }
 
+  clean_process_directory();
+
   return 1;
 }

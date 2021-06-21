@@ -8,7 +8,7 @@
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
  *
- * The above copyright notice and this permission notice shall be included in all  
+ * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <getopt.h>
+#include <math.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -51,17 +52,16 @@ typedef enum
   } clusterd_exec_wait;
 
 static const char *create_process_lua =
-  "if params.pinned ~= nil then\n"
-  "  n_id = clusterd.resolve_node(params.pinned)\n"
-  "  if n_id == nil then\n"
-  "    error('node ' .. params.pinned .. ' does not exist')\n"
-  "  end\n"
-  "  node = clusterd.get_node(n_id)\n"
-  "  if node == nil then\n"
-  "    error('could not find node')\n"
-  "  end\n"
-  "  clusterd.output(node.hostname)\n"
+  "n_id = clusterd.resolve_node(params.pinned)\n"
+  "if n_id == nil then\n"
+  "  error('node ' .. params.pinned .. ' does not exist')\n"
   "end\n"
+  "node = clusterd.get_node(n_id)\n"
+  "if node == nil then\n"
+  "  error('could not find node')\n"
+  "end\n"
+  "clusterd.output(node.hostname)\n"
+
   "svc = clusterd.get_service(params.namespace, params.service)\n"
   "if svc == nil then\n"
   "  error('service ' .. params.service .. ' in namespace ' .. params.namespace .. ' not found')\n"
@@ -117,6 +117,171 @@ static int kill_process(clusterctl *ctl, const char *namespace, clusterd_pid_t p
   return 0;
 }
 
+static int randomint(int lo, int hi) {
+  double r;
+  long int n, i;
+
+  r = random();
+  n = hi - lo;
+
+  i = lround(n * r);
+
+  return lo + i;
+}
+
+static const char *sample_nodes(FILE *schedule) {
+  static char chosennode[256];
+  char nodeline[1024], nodeid[37], hostname[256];
+  double last_score = NAN;
+  int nodes_examined = 0;
+
+  while ( fgets(nodeline, sizeof(nodeline), schedule) != NULL ) {
+    int n, r;
+    double next_score;
+
+    n = sscanf(nodeline, "%37s %256s %lf", nodeid, hostname, &next_score);
+    if ( n != 3 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline, ignoring: %s", nodeline);
+      continue;
+    }
+
+    if ( last_score == last_score &&
+         next_score < last_score ) {
+      // Done with node choices
+      return chosennode;
+    }
+
+    if ( last_score != last_score ) { // No nodes seen
+      last_score = next_score;
+    }
+
+    nodes_examined++;
+
+    r = randomint(1, nodes_examined);
+
+    if ( r <= 1 )
+      // Replace node
+      strncpy(chosennode, hostname, sizeof(chosennode));
+  }
+
+  if ( last_score == last_score )
+    return chosennode;
+
+  CLUSTERD_LOG(CLUSTERD_ERROR, "No nodes available for scheduling");
+  return NULL;
+}
+
+static void push_arg(const char ***args, const char *arg) {
+  int i = 0;
+
+  if ( ! (*args) )
+    *args = malloc(sizeof(*args) * 2);
+  else {
+    for ( i = 0; (*args)[i]; ++i );
+
+    *args = realloc(*args, sizeof(*args) * (i + 2));
+  }
+
+  if ( ! (*args) ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not push argument: no memory");
+    exit(EXIT_FAILURE);
+  }
+
+  (*args)[i] = arg;
+  (*args)[i + 1] = NULL;
+}
+
+static const char *schedule_process(clusterctl *ctl, const char *namespace, const char *service) {
+  int outpipe[2], err;
+  pid_t child;
+
+  err = pipe(outpipe);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not create pipe for 'clusterd-schedule'");
+    return NULL;
+  }
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not fork process for 'clusterd-schedule'");
+    close(outpipe[0]);
+    close(outpipe[1]);
+    return NULL;
+  } else if ( child == 0 ) {
+    close(outpipe[0]);
+    const char **args = NULL, *schedprog;
+
+    push_arg(&args, "clusterd-schedule");
+    if ( CLUSTERD_LOG_LEVEL <= CLUSTERD_DEBUG )
+      push_arg(&args, "-v");
+    push_arg(&args, "-n");
+    push_arg(&args, namespace);
+    push_arg(&args, "-s");
+    push_arg(&args, service);
+    push_arg(&args, "-t");
+    push_arg(&args, "30");
+
+    err = dup2(outpipe[1], STDOUT_FILENO);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not redirect stdout");
+      exit(EXIT_FAILURE);
+    }
+    close(outpipe[1]);
+
+    // Run clusterd-schedule
+    schedprog = getenv("CLUSTERD_SCHEDULE");
+    if ( !schedprog )
+      schedprog = "clusterd-schedule";
+
+    execvp(schedprog, (char *const *) args);
+
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not execute clusterd-schedule: %s", strerror(errno));
+    exit(EXIT_FAILURE);
+  } else {
+    FILE *schedule = NULL;
+    int wsts;
+    pid_t perr;
+    const char *ret;
+
+    close(outpipe[1]);
+
+    schedule = fdopen(outpipe[0], "rt");
+    if ( !schedule ) {
+      close(outpipe[0]);
+
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open clusterd-schedule output");
+
+      ret = NULL;
+      goto done;
+    }
+
+    // Read the schedule line by line
+    ret = sample_nodes(schedule);
+
+  done:
+    if ( schedule )
+      fclose(schedule);
+
+    perr = waitpid(child, &wsts, 0);
+    if ( perr < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait on clusterd-schedule process");
+      ret = NULL;
+    }
+
+    if ( WIFEXITED(wsts) && WEXITSTATUS(wsts) != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "clusterd-schedule returned failure error code: %d", WEXITSTATUS(wsts));
+      ret = NULL;
+    }
+
+    if ( WIFSIGNALED(wsts) && WTERMSIG(wsts) != SIGPIPE ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "clusterd-schedule killed by non-SIGPIPE signal: %d", WTERMSIG(wsts));
+      ret = NULL;
+    }
+
+    return ret;
+  }
+}
+
 static int create_process(clusterctl *ctl,
                           const char *namespace, const char *service,
                           const char *pinnednode, clusterd_pid_t *pid,
@@ -136,27 +301,24 @@ static int create_process(clusterctl *ctl,
     return -1;
   }
 
-  if ( pinnednode ) {
-    pid_start = strchr(newprocstr, '\n');
-    if ( !pid_start ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get pid from create process call");
-      errno = EPROTO;
-      return -1;
-    }
+  pid_start = strchr(newprocstr, '\n');
+  if ( !pid_start ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get pid from create process call");
+    errno = EPROTO;
+    return -1;
+  }
 
-    *pid_start = '\0';
+  *pid_start = '\0';
 
-    // Read the node address
-    if ( (pid_start - newprocstr) >= pinnedaddrlen ) {
-      CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot fit node address %s into buffer", newprocstr);
-      errno = ENAMETOOLONG;
-      return -1;
-    }
+  // Read the node address
+  if ( (pid_start - newprocstr) >= pinnedaddrlen ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot fit node address %s into buffer", newprocstr);
+    errno = ENAMETOOLONG;
+    return -1;
+  }
 
-    strncpy(pinnedaddr, newprocstr, pinnedaddrlen);
-    pid_start ++;
-  } else
-    pid_start = newprocstr;
+  strncpy(pinnedaddr, newprocstr, pinnedaddrlen);
+  pid_start ++;
 
   errno = 0;
   *pid = strtol(pid_start, &pid_end, 10);
@@ -427,6 +589,12 @@ int main(int argc, char *const *argv) {
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting a process in service %s (namespace %s)\n",
                service, namespace);
 
+  if ( !pinnednode )
+    pinnednode = schedule_process(&ctl, namespace, service);
+
+  if ( !pinnednode )
+    CLUSTERD_LOG(CLUSTERD_ERROR, "No node could be chosen for scheduling");
+
   /* First we find the service and make sure it exists, and create a
    * process in the scheduling state */
   err = create_process(&ctl, namespace, service, pinnednode, &pid,
@@ -457,21 +625,7 @@ int main(int argc, char *const *argv) {
     goto cleanup;
   }
 
-  /* Next, we choose a random assortment of nodes from the controller,
-   * and get them along with their resource capabilities and
-   * availabilities.
-   *
-   * If the process is pinned, then we run the node there
-   */
-  if ( !pinnednode ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Node selection not implemented yet TODO");
-    /* If not pinned, we attempt to contact all nodes and check the
-     * current state of their resources */
-
-    /* All nodes are now ranked. We choose the top-ranked one, or if
-     * there are multiple, we randomize the choice. */
-  } else
-    nodeaddr = pinnednodeaddr;
+  nodeaddr = pinnednodeaddr;
 
   if ( !nodeaddr ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "No node could be found for scheduling");

@@ -74,7 +74,7 @@ struct avail_resource {
 
   struct limit_request *resource;
   unsigned int available : 1; // If 1, then this resource is available, otherwise, it doesn't have this
-  json_int_t total_quantity;
+  double total_quantity;
   double in_use;
 };
 
@@ -167,6 +167,8 @@ static int add_global_limit(const char *limitspec) {
 
   equals = strchr(limitspec, '=');
 
+  r.weight = 1;
+
   if ( equals ) {
     r.resource = strndup(limitspec, equals - limitspec);
     if ( !r.resource ) {
@@ -184,7 +186,6 @@ static int add_global_limit(const char *limitspec) {
 
     if ( *afterlimit == '\0' ) {
       r.strictly_required = 1;
-      r.weight = NAN;
     }
 
     if ( *afterlimit == '@' ) {
@@ -212,7 +213,6 @@ static int add_global_limit(const char *limitspec) {
     r.resource = limitspec;
     r.quantity = 0;
     r.strictly_required = 1;
-    r.weight = NAN;
   }
 
   return update_global_limit(&r, 0);
@@ -406,18 +406,13 @@ static int process_node_line(struct node_entry *node, const char *line, size_t l
     return 0;
   }
 
-  HASH_FIND_PTR(node->resources, limit, node_rc);
-  if ( !node_rc ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "No max limit for resource '%s' specified for node %s", resource_name, node->hostname);
+  HASH_FIND_PTR(node->resources, &limit, node_rc);
+  if ( !node_rc || !node_rc->available ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "No max limit for resource '%s' specified for node %s. Limit should be %p",
+                 resource_name, node->hostname, limit);
     return 0;
   }
 
-  if ( node_rc->available ) {
-    CLUSTERD_LOG(CLUSTERD_WARNING, "Resource %s specified twice for node %s: skipping", resource_name, node->hostname);
-    return 0;
-  }
-
-  node_rc->available = 1;
   node_rc->in_use = qty;
 
   return 0;
@@ -453,6 +448,7 @@ static int collect_node_stats(struct node_entry *node) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Could not redirect stdout: %s", strerror(errno));
       exit(EXIT_FAILURE);
     }
+    close(stspipe[1]);
 
     // Now run ssh
     execvp("ssh", ssh_args);
@@ -523,7 +519,7 @@ static int score_node(struct node_entry *node) {
     struct avail_resource *rc;
     double pct_used;
 
-    HASH_FIND_PTR(node->resources, limit, rc);
+    HASH_FIND_PTR(node->resources, &limit, rc);
 
     if ( !rc || !rc->available ) {
       if ( limit->strictly_required ) {
@@ -537,12 +533,20 @@ static int score_node(struct node_entry *node) {
     if ( rc->in_use > rc->total_quantity )
       pct_used = 1;
     else
-      pct_used = rc->in_use / (double)rc->total_quantity;
+      pct_used = rc->in_use / rc->total_quantity;
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "[%s] resource '%s', %lf in use / %lf total (%lf in use)",
+                 node->hostname, limit->resource, rc->in_use, rc->total_quantity, pct_used);
 
     score += (1 - pct_used) * limit->weight;
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "[%s] score is now %lf (after %lf, 1 - pct = %lf, weight = %lf)",
+                 node->hostname, score, (1 - pct_used) * limit->weight,
+                 1 - pct_used, limit->weight);
   }
 
   node->score = score;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Score for %s is %lf", node->hostname, node->score);
 
   return 0;
 }
@@ -556,25 +560,47 @@ static int select_node(struct node_entry *n) {
     return -1;
   }
 
+  if ( hi < 0 ) hi = 0;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Finding spot for score %lf in range %d %d", n->score, lo, hi);
   // Find insertion point
-  while ( hi > lo ) {
+  while ( hi >= lo && g_chosen_node_count > 0 ) {
     int mid = (hi + lo) / 2;
-    if ( g_chosen_nodes[mid]->score >= n->score )
-      hi = mid - 1;
-    else
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Examine node %s(index=%d, score=%lf) versus %lf",
+                 g_chosen_nodes[mid]->hostname, mid, g_chosen_nodes[mid]->score, n->score);
+
+    if ( g_chosen_nodes[mid]->score >= n->score ) {
       lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Will examine %d %d", lo, hi);
   }
 
-  if ( hi == lo ) {
-    if ( hi >= g_chosen_node_capacity ) {
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "[%s] Got insertion point %d %d", n->hostname, lo, hi);
+
+  if ( lo == hi + 1 || g_chosen_node_count == 0 ) {
+    int new_index = lo;
+
+    if ( new_index >= g_chosen_node_capacity ) {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Node score %lf is lower than any other score, deleting", n->score);
       free_node_entry(n);
-    } else if ( hi < g_chosen_node_count ) {
-      free_node_entry(g_chosen_nodes[hi]);
-      g_chosen_nodes[hi] = n;
+    } else if ( new_index < g_chosen_node_count ) {
+      if ( g_chosen_node_count >= g_chosen_node_capacity ) {
+        free_node_entry(g_chosen_nodes[g_chosen_node_count - 1]);
+      } else
+        g_chosen_node_count ++;
+
+      // Shift over
+      memcpy(g_chosen_nodes + new_index + 1, g_chosen_nodes + new_index,
+             (g_chosen_node_count - new_index - 1) * sizeof(*g_chosen_nodes));
+
+      g_chosen_nodes[new_index] = n;
     } else {
       g_chosen_node_count ++;
-      g_chosen_nodes[hi] = n;
+      g_chosen_nodes[new_index] = n;
     }
   }
 
@@ -774,7 +800,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
 
   struct node_entry *entry;
 
-  CLUSTERD_LOG(CLUSTERD_INFO, "Got node %.*s", (int)nodelen, nodebuf);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got node %.*s", (int)nodelen, nodebuf);
 
   nodeinfo = json_loadb(nodebuf, nodelen, 0, &jsonerr);
   if ( !nodeinfo ) {
@@ -813,7 +839,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
   // Now parse all resources
   HASH_ITER(hh, g_global_limits, limit, limittmp) {
     char rc_column_name[1024];
-    json_int_t quantity;
+    double quantity;
     struct avail_resource *new_rc;
 
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Examine limit %s", limit->resource);
@@ -834,7 +860,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
     new_rc->resource = limit;
     new_rc->in_use = 0;
 
-    err = json_unpack(nodeinfo, "{sI}", rc_column_name, &quantity);
+    err = json_unpack(nodeinfo, "{sF}", rc_column_name, &quantity);
     if ( err < 0 ) {
       // Not available
       new_rc->available = 0;
@@ -843,6 +869,9 @@ static int add_node(const char *nodebuf, size_t nodelen) {
       new_rc->available = 1;
       new_rc->total_quantity = quantity;
     }
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Get column %s(limit %p) for %s: %d %lf",
+                 rc_column_name, limit, jsonname, err, quantity);
 
     HASH_ADD_PTR(entry->resources, resource, new_rc);
   }
@@ -1064,7 +1093,7 @@ int main(int argc, char *const *argv) {
     }
 
     examined_count ++;
-    if ( examined_count >= max_to_examine ) {
+    if ( max_to_examine >= 0 && examined_count >= max_to_examine ) {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Examined maximum number of nodes... waiting");
       break;
     }
