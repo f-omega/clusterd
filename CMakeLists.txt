@@ -84,3 +84,6 @@ target_link_libraries(clusterd-nsportd clusterctllib ${CMAKE_THREAD_LIBS_INIT} $
 
 add_executable(clusterd-schedule src/programs/clusterd-schedule.c)
 target_link_libraries(clusterd-schedule clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${JANSSON_LIBRARIES})
+
+add_executable(clusterd-dns src/programs/clusterd-dns.c)
+target_link_libraries(clusterd-dns clusterctllib ${CMAKE_THREAD_LIBS_INIT})

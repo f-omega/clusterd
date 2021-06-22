@@ -65,7 +65,7 @@
 
 #define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 12
 static uint8_t CLUSTERD_ENDPOINT_PREFIX[CLUSTERD_ENDPOINT_PREFIX_BYTELEN] =
-  { 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00 };
+  { CLUSTERD_ENDPOINT_PREFIX_ADDR, 0x00, 0x00, 0x00, 0x00 };
 
 struct pending_packet {
   uint32_t pkt_id;

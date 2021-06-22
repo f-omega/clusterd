@@ -12,6 +12,10 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+#define CLUSTERD_PRIVATE_NETWORK_ADDR 0xfd, 0xf0, 0x5f, 0x7b, 0x91, 0x1f
+#define CLUSTERD_PROCESS_PREFIX_ADDR CLUSTERD_PRIVATE_NETWORK_ADDR, 0x00, 0x01
+#define CLUSTERD_ENDPOINT_PREFIX_ADDR CLUSTERD_PRIVATE_NETWORK_ADDR, 0x00, 0x02
+
 #define CLUSTERD_PACKED __attribute__(( packed ))
 
 #define CLUSTERD_DEFAULT_RUNTIME_PATH "/var/lib/clusterd"

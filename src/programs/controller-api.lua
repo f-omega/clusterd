@@ -1330,6 +1330,12 @@ function clusterd.add_endpoint(ns, opts)
   assert(opts.processes ~= nil and type(opts.processes) == "table",
          'at least one process must be provided to add endpoint')
 
+  if opts.names == nil then
+    opts.names = {}
+  end
+
+  assert(type(opts.names) == "table", 'endpoint names must be a table')
+
   resolved_ps = {}
   for _, ps in ipairs(opts.processes) do
     psid = clusterd.resolve_process(ns, ps)
@@ -1378,7 +1384,44 @@ function clusterd.add_endpoint(ns, opts)
     end
   end
 
+  -- Add the names, if any
+  for _, nm in ipairs(opts.names) do
+    _, err = api.run(
+      [[REPLACE INTO endpoint_names (epn_ns, epn_id, epn_name)
+        VALUES ($ns, $epid, $name)]],
+     { ns = nsid, epid = newepid, name = nm }
+    )
+    if err ~= nil then
+      error('could not bind name ' .. name .. ' to endpoint: ' .. err)
+    end
+  end
+
   return clusterd.get_endpoint(nsid, newepid)
+end
+
+function clusterd.get_endpoint_by_name(ns, ep)
+  assert(ns ~= nil, 'namespace must be provided to lookup endpoint by name')
+  assert(ep ~= nil and type(ep) == "string", 'endpoint id must be a string to lookup endpoint by name')
+
+  nsid = clusterd.resolve_namespace(ns)
+  if nsid == nil then
+    error('namespace ' .. tostring(ns) .. ' not found')
+  end
+
+  res, err = api.run(
+    [[SELECT epn_id AS endpoint FROM endpoint_names
+      WHERE epn_ns = $ns AND epn_name = $name]],
+    { ns = nsid, name = ep }
+  )
+  if err ~= nil then
+    error('could not lookup endpoint name ' .. ep .. ' in namespace ' .. tostring(ns) .. ': ' .. err)
+  end
+
+  if #res == 0 then
+    return nil
+  end
+
+  return clusterd.get_endpoint(nsid, res[1].endpoint)
 end
 
 function clusterd.get_endpoint(ns, ep)
@@ -1387,12 +1430,12 @@ function clusterd.get_endpoint(ns, ep)
 
   nsid = clusterd.resolve_namespace(ns)
   if nsid == nil then
-    error('namespace ' .. ns .. ' not found')
+    error('namespace ' .. tostring(ns) .. ' not found')
   end
 
   epid = tonumber(ep)
   if epid == nil then
-    error('endpoint ' .. ep .. ' not found')
+    return clusterd.get_endpoint_by_name(nsid, ep)
   end
 
   res, err = api.run(
@@ -1421,4 +1464,5 @@ function clusterd.get_endpoint(ns, ep)
   ret.claims = res
   return ret
 end
+
 return clusterd

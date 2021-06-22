@@ -247,3 +247,15 @@ CREATE TABLE IF NOT EXISTS endpoint_claim
       REFERENCES process(ps_ns, ps_id)
       ON DELETE CASCADE
   );
+
+CREATE TABLE IF NOT EXISTS endpoint_name
+  ( epn_ns INTEGER NOT NULL
+  , epn_id INTEGER NOT NULL
+  , epn_name TEXT NOT NULL
+
+  , PRIMARY KEY (epn_ns, epn_name)
+  , CONSTRAINT epn_endpoint_fk
+      FOREIGN KEY (epn_ns, epn_id)
+      REFERENCES endpoint(ep_ns, ep_id)
+      ON DELETE CASCADE
+  );
