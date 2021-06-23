@@ -1387,12 +1387,12 @@ function clusterd.add_endpoint(ns, opts)
   -- Add the names, if any
   for _, nm in ipairs(opts.names) do
     _, err = api.run(
-      [[REPLACE INTO endpoint_names (epn_ns, epn_id, epn_name)
+      [[REPLACE INTO endpoint_name (epn_ns, epn_id, epn_name)
         VALUES ($ns, $epid, $name)]],
      { ns = nsid, epid = newepid, name = nm }
     )
     if err ~= nil then
-      error('could not bind name ' .. name .. ' to endpoint: ' .. err)
+      error('could not bind name ' .. nm .. ' to endpoint: ' .. err)
     end
   end
 
@@ -1409,7 +1409,7 @@ function clusterd.get_endpoint_by_name(ns, ep)
   end
 
   res, err = api.run(
-    [[SELECT epn_id AS endpoint FROM endpoint_names
+    [[SELECT epn_id AS endpoint FROM endpoint_name
       WHERE epn_ns = $ns AND epn_name = $name]],
     { ns = nsid, name = ep }
   )
