@@ -1614,15 +1614,16 @@ int main (int argc, char *const *argv) {
   if ( daemonize )
     setup_daemon();
 
-  err = start_threads(thcnt, nftfd);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not start threads: %s", strerror(errno));
-    return 1;
-  }
 
   g_netlink_socket = nl = start_ns_helper(ns_file, &nftfd);
   if ( !nl ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open netfilter socket: %s", strerror(errno));
+    return 1;
+  }
+
+  err = start_threads(thcnt, nftfd);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not start threads: %s", strerror(errno));
     return 1;
   }
 
