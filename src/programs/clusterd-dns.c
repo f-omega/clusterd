@@ -303,7 +303,7 @@ static int resolve_name(const char *ns, const char *qname, struct in6_addr *reso
   static const char resolve_name_lua[] =
     "success, nm = pcall(clusterd.get_endpoint_by_name, params.namespace, params.name)\n"
     "if success and nm ~= nil then\n"
-    "  clusterd.output(tostring(nm.namespace) .. ' ' .. tostring(nm.endpoint))\n"
+    "  clusterd.output(tostring(nm.namespace) .. ' ' .. tostring(nm.id))\n"
     "end\n";
 
   clusterctl ctl;
