@@ -85,6 +85,11 @@ struct mapped_endpoint {
   UT_hash_handle hh;
 };
 
+struct worker_data {
+  int nftfd;
+  pthread_barrier_t barrier;
+};
+
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 
 static pthread_mutex_t g_packet_queue_mutex;
@@ -595,10 +600,19 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
 
 static void *packet_processor_worker(void *data) {
   // Block all signals in this thread
-  int err, is_ctl_open = 0, verdict;
+  int err, is_ctl_open = 0, verdict, nftfd;
   struct pending_packet *packet = NULL;
   clusterctl ctl;
-  int nftfd = *(int *)data;
+
+  struct worker_data *wdata = (struct worker_data *)data;
+
+  nftfd = wdata->nftfd;
+
+  err = pthread_barrier_wait(&wdata->barrier);
+  if ( err == PTHREAD_BARRIER_SERIAL_THREAD ) {
+    pthread_barrier_destroy(&wdata->barrier);
+    free(wdata);
+  }
 
   for (;;) {
     if ( pthread_mutex_lock(&g_packet_queue_mutex) != 0 ) {
@@ -1321,50 +1335,63 @@ static int allocate_packet_queue(int qlen) {
 
 static int start_threads(int thcnt, int nftfd) {
   int i, n = 0, err;
+  struct worker_data *data;
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting %d thread(s) for thread pool", thcnt);
+
+  data = malloc(sizeof(*data));
+  if ( !data ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not allocate thread data");
+    return -1;
+  }
 
   err = pthread_mutex_init(&g_nft_mutex, NULL);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create NFTables mutex: %s", strerror(errno));
+    free(data);
     return -1;
   }
 
   err = pthread_mutex_init(&g_endpoint_mutex, NULL);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create endpoint mutex: %s", strerror(errno));
+    free(data);
     return -1;
   }
 
   err = pthread_mutex_init(&g_packet_queue_mutex, NULL);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create packet queue mutex: %s", strerror(errno));
+    free(data);
     return -1;
   }
 
   err = pthread_cond_init(&g_packet_queue_cond, NULL);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create packet queue condition: %s", strerror(errno));
+    free(data);
+    return -1;
+  }
+
+  data->nftfd = nftfd;
+
+  err = pthread_barrier_init(&data->barrier, NULL, thcnt);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create barrier: %s", strerror(errno));
+    free(data);
     return -1;
   }
 
   for ( i = 0; i < thcnt; ++i ) {
     pthread_t hdl;
 
-    err = pthread_create(&hdl, NULL, packet_processor_worker, &nftfd);
+    err = pthread_create(&hdl, NULL, packet_processor_worker, data);
     if ( err < 0 ) {
-      if ( i == 0 ) {
-	CLUSTERD_LOG(CLUSTERD_CRIT, "Could not launch an thread in thread pool: %s", strerror(errno));
-	return -1;
-      } else {
-	CLUSTERD_LOG(CLUSTERD_WARNING, "Could not launch thread in therad pool: %s", strerror(errno));
-      }
-    } else
-      n += 1;
+      free(data);
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not launch a thread in thread pool: %s", strerror(errno));
+      return -1;
+    }
   }
-
-  if ( n != thcnt )
-    CLUSTERD_LOG(CLUSTERD_WARNING, "Launched %d threads in thread pool, but wanted %d", n, thcnt);
 
   return 0;
 }
