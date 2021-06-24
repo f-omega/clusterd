@@ -94,8 +94,8 @@ struct dnsanswer {
   uint16_t len;
 } CLUSTERD_PACKED;
 
-#define CLUSTERD_DOMAIN    "clusterd.local"
-#define CLUSTERD_ENDPOINTS "ep.clusterd.local"
+#define CLUSTERD_DOMAIN    "clusterd"
+#define CLUSTERD_ENDPOINTS "ep.clusterd"
 
 #define DNS_ISRESPONSE(hdr) (!!(ntohs((hdr)->flags) & DNS_RESPONSE_F))
 #define DNS_RECURSION_REQUESTED(hdr) (!!(ntohs((hdr)->flags) & DNS_RECURSIVE_F))
