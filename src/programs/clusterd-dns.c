@@ -606,6 +606,8 @@ static int change_user(const char *user, const char *group) {
       return -1;
     }
   }
+
+  return 0;
 }
 
 static void usage() {
