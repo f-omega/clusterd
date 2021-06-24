@@ -30,9 +30,12 @@
 #include <signal.h>
 #include <stdint.h>
 #include <time.h>
+#include <grp.h>
+#include <pwd.h>
 
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 
 #include <netinet/in.h>
 
@@ -559,10 +562,58 @@ static int process_dns_packet(int fd) {
   }
 }
 
+static int change_user(const char *user, const char *group) {
+  uid_t uid, origuid;
+  gid_t gid, origgid;
+  int err;
+
+  origuid = uid = getuid();
+  origgid = gid = getgid();
+
+  if ( user ) {
+    struct passwd *pw = getpwnam(user);
+    if ( !pw ) {
+      errno = ENOENT;
+      return -1;
+    }
+
+    uid = pw->pw_uid;
+    gid = pw->pw_gid;
+  }
+
+  if ( group ) {
+    struct group *gr = getgrnam(group);
+    if ( !gr ) {
+      errno = ENOENT;
+      return -1;
+    }
+
+    gid = gr->gr_gid;
+  }
+
+  if ( gid != origgid ) {
+    err = setgid(gid);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not change group to %s: %s", group, strerror(errno));
+      return -1;
+    }
+  }
+
+  if ( uid != origuid ) {
+    err = setuid(uid);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not change user to %s: %s", user, strerror(errno));
+      return -1;
+    }
+  }
+}
+
 static void usage() {
   fprintf(stderr, "clusterd-dns -- provide DNS resolution for clusterd namespaces\n");
-  fprintf(stderr, "Usage: clusterd-dns -tvh [-e ENDPOINT...]\n\n");
+  fprintf(stderr, "Usage: clusterd-dns -tvh [-u USER] [-g GROUP] [-e ENDPOINT...]\n\n");
   fprintf(stderr, "   -e ENDPOINT    Bind to the given UDP endpoint (IPv4 or IPv6)\n");
+  fprintf(stderr, "   -u USER        Switch to this user after binding the socket\n");
+  fprintf(stderr, "   -g GROUP       Switch to this group after binding the socket\n");
   fprintf(stderr, "   -t             Require namespaces for endpoint resolution. Disable deduction\n");
   fprintf(stderr, "   -v             Show verbose debugging output\n");
   fprintf(stderr, "   -h             Show this help message\n\n");
@@ -571,11 +622,12 @@ static void usage() {
 
 int main(int argc, char *const *argv) {
   int c, err, i;
+  const char *user = NULL, *group = NULL;
 
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "e:tvh")) != -1 ) {
+  while ( (c = getopt(argc, argv, "e:u:g:tvh")) != -1 ) {
     switch ( c ) {
     case 'e':
       err = open_dns_socket(optarg, IPPROTO_UDP);
@@ -584,6 +636,24 @@ int main(int argc, char *const *argv) {
         return 1;
       }
 
+      break;
+
+    case 'u':
+      if ( !user ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "-u must be given only once");
+        return 1;
+      }
+
+      user = optarg;
+      break;
+
+    case 'g':
+      if ( !group ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "-g must be given only once");
+        return 1;
+      }
+
+      group = optarg;
       break;
 
     case 't':
@@ -601,6 +671,14 @@ int main(int argc, char *const *argv) {
     default:
       CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid option: %c", optopt);
       usage();
+      return 1;
+    }
+  }
+
+  if ( user || group ) {
+    err = change_user(user, group);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not change user to %s:%s: %s", user, group, strerror(errno));
       return 1;
     }
   }
