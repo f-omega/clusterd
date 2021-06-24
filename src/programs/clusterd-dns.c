@@ -271,7 +271,7 @@ static void send_dns_aaaa_answer(int rspfd, struct sockaddr_storage *addr, sockl
 
   rsp.qdcnt = rsp.nscnt = rsp.arcnt = 0;
 
-  rsp.ancnt = 1;
+  rsp.ancnt = htons(1);
 
   ans.class = htons(DNS_CLASS_IN);
   ans.type = htons(DNS_TYPE_AAAA);
