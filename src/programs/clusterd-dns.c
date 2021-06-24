@@ -639,7 +639,7 @@ int main(int argc, char *const *argv) {
       break;
 
     case 'u':
-      if ( !user ) {
+      if ( user ) {
         CLUSTERD_LOG(CLUSTERD_ERROR, "-u must be given only once");
         return 1;
       }
@@ -648,7 +648,7 @@ int main(int argc, char *const *argv) {
       break;
 
     case 'g':
-      if ( !group ) {
+      if ( group ) {
         CLUSTERD_LOG(CLUSTERD_ERROR, "-g must be given only once");
         return 1;
       }
