@@ -441,7 +441,10 @@ static void resolve(int rspfd, struct dnshdr *hdr, char *qname, int dnstype,
 
       send_dns_aaaa_answer(rspfd, addr, addrlen, hdr, qnameraw, qnamelen, &resolved);
       return;
-    } else goto error; // Success, but no records
+    } else {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Sought records of type %d, but couldn't find", dnstype);
+      goto error; // Success, but no records
+    }
   } else if ( strip_domain(qname, CLUSTERD_DOMAIN) == 0 ) {
     flags |= DNS_AUTHORITATIVE_F;
     dnserr = DNS_RCODE_NMERR;
