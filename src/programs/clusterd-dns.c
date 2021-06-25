@@ -385,7 +385,7 @@ static void resolve(int rspfd, struct dnshdr *hdr, char *qname, int dnstype,
     flags |= DNS_AUTHORITATIVE_F;
 
     if ( last_component(qname, &ns) != 0 ) {
-      dnserr = DNS_RCODE_NMERR;
+      /// dnserr = DNS_RCODE_NMERR;
       goto error;
     }
 
