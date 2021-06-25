@@ -94,6 +94,11 @@ struct dnsanswer {
   uint16_t len;
 } CLUSTERD_PACKED;
 
+struct dnsquestion {
+  uint16_t qtype;
+  uint16_t qclass;
+} CLUSTERD_PACKED;
+
 #define CLUSTERD_DOMAIN    "clusterd"
 #define CLUSTERD_ENDPOINTS "ep.clusterd"
 
@@ -256,11 +261,12 @@ static int deduce_namespace(struct sockaddr_storage *addr, socklen_t addrlen,
 
 static void send_dns_aaaa_answer(int rspfd, struct sockaddr_storage *addr, socklen_t addrlen,
                                  struct dnshdr *hdr, const char *qnameraw, size_t qnamelen,
-                                 struct in6_addr *resolved) {
+                                 int dnstype, int dnsclass, struct in6_addr *resolved) {
   struct dnshdr rsp;
   struct dnsanswer ans;
+  struct dnsquestion question;
   struct msghdr msg;
-  struct iovec iov[4];
+  struct iovec iov[6];
   ssize_t err;
 
   rsp.pktid = hdr->pktid;
@@ -269,23 +275,30 @@ static void send_dns_aaaa_answer(int rspfd, struct sockaddr_storage *addr, sockl
   DNS_SETRCODE(rsp.flags, DNS_RCODE_OK);
   rsp.flags = htons(rsp.flags);
 
-  rsp.qdcnt = rsp.nscnt = rsp.arcnt = 0;
+  rsp.nscnt = rsp.arcnt = 0;
 
-  rsp.ancnt = htons(1);
+  rsp.qdcnt = rsp.ancnt = htons(1);
 
   ans.class = htons(DNS_CLASS_IN);
   ans.type = htons(DNS_TYPE_AAAA);
   ans.ttl = htonl(300);
   ans.len = htons(16);
 
+  question.qclass = htons(dnsclass);
+  question.qtype = htons(dnstype);
+
   iov[0].iov_base = (void *)&rsp;
   iov[0].iov_len = sizeof(rsp);
   iov[1].iov_base = (void *)qnameraw;
   iov[1].iov_len = qnamelen;
-  iov[2].iov_base = (void *)&ans;
-  iov[2].iov_len = sizeof(ans);
-  iov[3].iov_base = resolved->s6_addr;
-  iov[3].iov_len = 16;
+  iov[2].iov_base = (void *)&question;
+  iov[2].iov_len = sizeof(question);
+  iov[3].iov_base = (void *)qnameraw;
+  iov[3].iov_len = qnamelen;
+  iov[4].iov_base = (void *)&ans;
+  iov[4].iov_len = sizeof(ans);
+  iov[5].iov_base = resolved->s6_addr;
+  iov[5].iov_len = 16;
 
   msg.msg_name = (void *)addr;
   msg.msg_namelen = addrlen;
@@ -366,7 +379,8 @@ static int resolve_name(const char *ns, const char *qname, struct in6_addr *reso
   return 0;
 }
 
-static void resolve(int rspfd, struct dnshdr *hdr, char *qname, int dnstype,
+static void resolve(int rspfd, struct dnshdr *hdr, char *qname,
+                    int dnstype, int dnsclass,
                     char *qnameraw, size_t qnamelen,
                     struct sockaddr_storage *addr, socklen_t addrlen) {
   int err, dnserr = DNS_RCODE_OK;
@@ -439,7 +453,7 @@ static void resolve(int rspfd, struct dnshdr *hdr, char *qname, int dnstype,
         goto error;
       }
 
-      send_dns_aaaa_answer(rspfd, addr, addrlen, hdr, qnameraw, qnamelen, &resolved);
+      send_dns_aaaa_answer(rspfd, addr, addrlen, hdr, qnameraw, qnamelen, dnstype, dnsclass, &resolved);
       return;
     } else {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Sought records of type %d, but couldn't find", dnstype);
@@ -558,7 +572,7 @@ static int process_dns_packet(int fd) {
         continue;
       }
 
-      resolve(fd, &hdr, qname, qtype, qnameraw, qnamelen, &addr, addrlen);
+      resolve(fd, &hdr, qname, qtype, qclass, qnameraw, qnamelen, &addr, addrlen);
     }
 
     return 0;
