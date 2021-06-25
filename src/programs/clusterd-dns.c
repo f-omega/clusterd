@@ -429,7 +429,7 @@ static void resolve(int rspfd, struct dnshdr *hdr, char *qname, int dnstype,
 
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Need to lookup name %s in namespace %s", qname, ns);
 
-    if ( dnstype == DNS_TYPE_AAAA ) {
+    if ( dnstype == DNS_TYPE_AAAA || dnstype == DNS_TYPE_A ) {
       struct in6_addr resolved;
 
       // TODO don't expose cross-namespace names unless requested
