@@ -85,7 +85,7 @@ static void usage() {
   fprintf(stderr, "                 Request additional resources, overriding requirements from\n");
   fprintf(stderr, "                 the controller\n");
   fprintf(stderr, "   -w CONDITION  Wait for the service to reach some state before exiting\n");
-  fprintf(stderr, "   -d            Run the host process in debug mode (logs output to a logging directory)");
+  fprintf(stderr, "   -d            Run the host process in debug mode (logs output to a logging directory)\n");
   fprintf(stderr, "   -i            Redirect the stdout of the process onto the current terminal\n");
   fprintf(stderr, "   -I            Redirect both stdin and stdout of the process to the current terminal\n");
   fprintf(stderr, "   -v            Show verbose debugging output\n");
@@ -351,7 +351,8 @@ clusterd_exec_wait parse_wait_condition(const char *c) {
 
 static int launch_service(clusterctl *ctl, const char *nodeaddr,
                           const char *namespace, const char *service, clusterd_pid_t pid,
-                          int keep_logs, int argc, char *const *argv) {
+                          int keep_logs, int interactive,
+                          int argc, char *const *argv) {
   const char **new_argv, *cmd;
   char ourname[HOST_NAME_MAX + 1], pidstr[32];
   int err, argind = 0, sts[2];
@@ -395,6 +396,9 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
 
   if ( keep_logs )
     new_argv[argind++] = "-d";
+
+  if ( interactive )
+    new_argv[argind++] = "-i";
 
   new_argv[argind++] = "-p";
   new_argv[argind++] = pidstr;
@@ -635,7 +639,8 @@ int main(int argc, char *const *argv) {
   if ( firstarg < 0 ) firstarg = argc;
 
   err = launch_service(&ctl, nodeaddr, namespace, service, pid,
-                       keep_logs, argc - firstarg, argv + firstarg);
+                       keep_logs, redirect_stdin || redirect_stdout,
+                       argc - firstarg, argv + firstarg);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not launch service: %s", strerror(errno));
     goto cleanup;

@@ -418,7 +418,7 @@ static int setup_interactive_logs() {
     return -1;
   }
 
-  g_hosterr_fd = dup(STDERR_FILENO);
+  g_service_out = g_hosterr_fd = dup(STDERR_FILENO);
   if ( g_hosterr_fd < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not save interactive fd: %s", strerror(errno));
     return -1;
@@ -1019,7 +1019,7 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set parent death signal: %s", strerror(errno));
       exit(100);
     }
-
+ 
     err = drop_privileges();
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges: %s", strerror(errno));
@@ -1889,11 +1889,13 @@ int main(int argc, char *const *argv) {
     }
   }
 
-  err = open_service_logs();
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "");
-    fclose(g_urandom);
-    goto cleanup_proc;
+  if ( !interactive ) {
+    err = open_service_logs();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "");
+      fclose(g_urandom);
+      goto cleanup_proc;
+    }
   }
 
   stspipe = make_status_pipe();
@@ -1957,7 +1959,10 @@ int main(int argc, char *const *argv) {
   }
 
   /* Daemonize now */
-  daemon_pid = daemonize();
+  if ( interactive )
+    daemon_pid = 0; // Pretend we're in the child
+  else
+    daemon_pid = daemonize();
 
   if ( daemon_pid < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not daemonize process: %s", strerror(errno));
