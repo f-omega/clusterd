@@ -25,6 +25,7 @@
 #include "clusterd/log.h"
 #include "clusterd/controller.h"
 #include "clusterd/common.h"
+#include "clusterd/request.h"
 
 #include "sha256.h"
 
@@ -41,7 +42,14 @@
 #include <raft.h>
 #include <raft/uv.h>
 
+#include <uthash.h>
+
 #define CLUSTERD_DEFAULT_CONTROLLER_PORT 38019
+#define PENDING_SIGNAL_EAGAIN_DELAY 300 // 300 ms
+#define PENDING_SIGNAL_RETRANSMIT_BASE 200
+#define PENDING_SIGNAL_MAX_RETRANSMITS 5
+#define PENDING_SIGNAL_JITTER 200
+#define PENDING_SIGNAL_MAX_TIMEOUT 30000 // 30 seconds at most
 
 extern struct raft *lua_tx_raft;
 
@@ -62,12 +70,29 @@ typedef enum
 struct controller_client;
 
 typedef struct {
+  clusterd_namespace_t ns;
+  clusterd_pid_t ps;
+  struct sockaddr_storage monitor;
+} clusterd_signal_target;
+
+typedef struct {
+  clusterd_signal_target target;
+
+  int last_sigswaiting, sigswaiting, retransmits;
+  uv_timer_t rto, timeout;
+
+  UT_hash_handle hh;
+} pending_signal;
+
+typedef struct {
   uv_tcp_t tcp;
+  uv_udp_t udp; // For monitor requests for signal propagation
   struct raft *raft;
 
   unsigned int log_entries_pending : 1;
 
   struct controller_client *processing_head, *processing_tail;
+  pending_signal *pending_signals;
 } controller_service;
 
 typedef struct controller_client {
@@ -137,6 +162,7 @@ int clusterd_apply_tx(char *sql, size_t sqlsz, char **errmsg);
 int clusterd_commit(char **errmsg);
 int clusterd_begin(char **errmsg, int writable);
 int clusterd_rollback();
+static void process_psig_confirmations();
 
 static void trace_raft(struct raft_tracer *a, const char *file, int line, const char *msg) {
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Raft: %s:%d: %s", file, line, msg);
@@ -1122,6 +1148,336 @@ static void client_respond(controller_client *client, const char *fmt, ...) {
   }
 }
 
+// Signal handling
+void psig_try_send_again(uv_timer_t *tmr);
+void psig_rto_timeout(uv_timer_t *tmr);
+void psig_timeout(uv_timer_t *tmr);
+void remove_pending_signal(pending_signal *psig);
+static void deliver_pending_signal(pending_signal *psig) {
+  int err;
+  char psigbuf[2048];
+  off_t off = 0, attroff = 0;
+
+  clusterd_namespace_t netns = CLUSTERD_HTON_NAMESPACE(psig->target.ns);
+  clusterd_pid_t netps = CLUSTERD_HTON_PROCESS(psig->target.ps);
+  uint32_t netsigswaiting = htonl(psig->sigswaiting);
+
+  uv_buf_t psig_msg;
+
+  CLUSTERD_INIT_REQ(psigbuf, off, sizeof(psigbuf), CLUSTERD_OP_SIG_NOTIFY);
+  CLUSTERD_ADD_ATTR(psigbuf, off, attroff, CLUSTERD_ATTR_NAMESPACE);
+  CLUSTERD_WRITE_ATTR(psigbuf, off, &netns, sizeof(netns));
+  CLUSTERD_ADD_ATTR(psigbuf, off, attroff, CLUSTERD_ATTR_PROCESS);
+  CLUSTERD_WRITE_ATTR(psigbuf, off, &netps, sizeof(netps));
+  CLUSTERD_ADD_ATTR(psigbuf, off, attroff, CLUSTERD_ATTR_SIGORDINAL);
+  CLUSTERD_WRITE_ATTR(psigbuf, off, &netsigswaiting, sizeof(netsigswaiting));
+  CLUSTERD_FINISH_REQUEST(psigbuf, off, attroff);
+
+  psig_msg.base = psigbuf;
+  psig_msg.len = off;
+
+  err = uv_udp_try_send(&g_service->udp, &psig_msg, 1,
+                        (struct sockaddr *)&psig->target.monitor);
+  if ( err != 0 ) {
+    if ( err == -UV_EAGAIN ) {
+      int jitter = (random() % PENDING_SIGNAL_JITTER) - (PENDING_SIGNAL_JITTER/2);
+
+      // Could not send immediately, ask the timer to come back in a bit
+      err = uv_timer_start(&psig->rto, psig_try_send_again, PENDING_SIGNAL_EAGAIN_DELAY + jitter, 0);
+      if ( err != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Could not set eagain timer for pending signal for process " PID_F "(ns=" NS_F "): %s",
+                     psig->target.ps, psig->target.ns, uv_strerror(err));
+        remove_pending_signal(psig);
+      }
+
+    } else {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not send signal request for pending signal for process " PID_F "(ns=" NS_F "): %s",
+                   psig->target.ps, psig->target.ns, uv_strerror(err));
+      remove_pending_signal(psig);
+    }
+
+    return;
+  }
+
+  // If succeeded, then set last_sigswaiting to sigswaiting
+  psig->last_sigswaiting = psig->sigswaiting;
+
+  // Also reset the timeout based on the number of retransmits
+      err = uv_timer_start(&psig->rto, psig_rto_timeout, PENDING_SIGNAL_RETRANSMIT_BASE * (1 << psig->retransmits), 0);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not set timeout for pending signal for process " PID_F "(ns=" NS_F "): %s",
+                 psig->target.ps, psig->target.ns, uv_strerror(err));
+    remove_pending_signal(psig);
+    return;
+  }
+
+  return;
+
+ nospace:
+  CLUSTERD_LOG(CLUSTERD_CRIT, "Not enough space to send pending signal for process " PID_F "(ns=" NS_F ")",
+               psig->target.ps, psig->target.ns);
+  remove_pending_signal(psig);
+}
+
+void remove_pending_signal(pending_signal *psig) {
+  // Cancel all timeouts
+  int err;
+
+  err = uv_timer_stop(&psig->rto);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not cancel rto timer: %s", uv_strerror(err));
+    return;
+  }
+
+  err = uv_timer_stop(&psig->timeout);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not cancel timeout timer; %s", uv_strerror(err));
+    return;
+  }
+
+  HASH_DELETE(hh, g_service->pending_signals, psig);
+  free(psig);
+}
+
+// Called when we couldn't send a signal request due to udp queue
+// length. This sends the request again with no increment to the
+// retransmits
+void psig_try_send_again(uv_timer_t *tmr) {
+  // Deliver the message again, no increment to retransmits
+  deliver_pending_signal((pending_signal *) tmr->data);
+}
+
+// Called when there is no acknowleddgement of a signal queue length request.
+void psig_rto_timeout(uv_timer_t *tmr) {
+  pending_signal *psig = (pending_signal *) tmr->data;
+
+  if ( psig->retransmits >= PENDING_SIGNAL_MAX_RETRANSMITS ) {
+    // Give up
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Giving up on signal notification for process " PID_F "(ns=" NS_F ")",
+                 psig->target.ps, psig->target.ns);
+    remove_pending_signal(psig);
+    return;
+  }
+
+  psig->retransmits ++;
+  deliver_pending_signal(psig);
+}
+
+// Called when the pending signal has simply been in play too
+// long. Forces the signal to be deleted..2
+void psig_timeout(uv_timer_t *tmr) {
+  pending_signal *psig = (pending_signal *) tmr->data;
+
+  CLUSTERD_LOG(CLUSTERD_WARNING, "Giving up on signal notification for process " PID_F "(ns=" NS_F ")",
+               psig->target.ps, psig->target.ns);
+  remove_pending_signal(psig);
+}
+
+int clusterd_enqueue_signal(clusterd_namespace_t ns, clusterd_pid_t ps, int sigswaiting,
+                            struct sockaddr_storage *node) {
+  clusterd_signal_target tgt;
+  pending_signal *psig;
+  int err;
+
+  tgt.ns = ns;
+  tgt.ps = ps;
+  memcpy(&tgt.monitor, node, sizeof(tgt.monitor));
+
+  if ( node->ss_family == AF_INET ) {
+    struct sockaddr_in *sin = (struct sockaddr_in *) node;
+    sin->sin_port = htons(CLUSTERD_DEFAULT_MONITOR_PORT);
+  } else if ( node->ss_family == AF_INET6 ) {
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) node;
+    sin6->sin6_port = htons(CLUSTERD_DEFAULT_MONITOR_PORT);
+  } else {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid addr family %d when enqueueing signal", node->ss_family);
+
+    errno = EAFNOSUPPORT;
+    return -1;
+  }
+
+  HASH_FIND(hh, g_service->pending_signals, &tgt, sizeof(tgt), psig);
+  if ( psig ) {
+    psig->sigswaiting = sigswaiting;
+  } else {
+    psig = malloc(sizeof(*psig));
+    if ( !psig ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Cannot enqueue signal for process " PID_F "(ns=" NS_F ")",
+                   ps, ns);
+      return -1;
+    }
+
+    memcpy(&psig->target, &tgt, sizeof(psig->target));
+    psig->last_sigswaiting = -1;
+    psig->sigswaiting = sigswaiting;
+    psig->retransmits = 0;
+
+    err = uv_timer_init(g_service->udp.loop, &psig->rto);
+    if ( err != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Cannot enqueue signal for process " PID_F "(ns=" NS_F "): "
+                   "could not initialize rto timer: %s", ps, ns, uv_strerror(err));
+      free(psig);
+      return -1;
+    }
+
+    err = uv_timer_init(g_service->udp.loop, &psig->timeout);
+    if ( err != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Cannot enqueue signal for process " PID_F "(ns=" NS_F "): "
+                   "could not initialize timeout: %s", ps, ns, uv_strerror(err));
+      free(psig);
+      return -1;
+    }
+
+    psig->rto.data = (void*) psig;
+    psig->timeout.data = (void*) psig;
+
+    err = uv_timer_start(&psig->timeout, psig_timeout, PENDING_SIGNAL_MAX_TIMEOUT, 0);
+    if ( err != 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not set timeout for pending signal: %s", uv_strerror(err));
+      free(psig);
+      return -1;
+    }
+
+    HASH_ADD(hh, g_service->pending_signals, target, sizeof(psig->target), psig);
+  }
+
+  deliver_pending_signal(psig);
+
+  return 0;
+}
+
+static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t *buf,
+                                    const struct sockaddr *addr, unsigned int flags) {
+  struct sockaddr_storage saddr;
+  clusterd_request req;
+  clusterd_attr *attr;
+
+  int has_ns = 0, has_ps = 0;
+  clusterd_signal_target tgt;
+
+  pending_signal *psig;
+
+  if ( clusterd_addr_normalize(&saddr, addr) < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Received garbage address from libuv");
+    goto again;
+  }
+
+  if ( nread < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Error receiving psig confirmation");
+  }
+
+  if ( nread <= 0 ) {
+    process_psig_confirmations();
+    return;
+  }
+
+  if ( buf->len < sizeof(req) ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram too short");
+    goto again;
+  }
+
+  memcpy(&req, buf->base, sizeof(req));
+
+  if ( ntohs(req.length) >= nread ||
+       buf->len < nread ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram cut short");
+    goto again;
+  }
+
+  if ( ntohl(req.magic) != CLUSTERD_MAGIC ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring pending signal confirmation datagram because magic is missing");
+    goto again;
+  }
+
+  if ( ntohs(req.op) != CLUSTERD_OP_SIG_ACK ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring pending signal acknowledgement because operation is wrong");
+    goto again;
+  }
+
+  FORALL_CLUSTERD_ATTRS(attr, buf->base, &req) {
+    switch ( ntohs(attr->atype) ) {
+    case CLUSTERD_ATTR_NAMESPACE:
+      if ( has_ns ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has duplicate namespace. Ignoring");
+      } else if ( ntohs(attr->alen) != sizeof(tgt.ns) ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has too short namespace. Ignoring");
+      } else {
+        void *nsp = CLUSTERD_ATTR_DATA(attr, buf->base, &req);
+        if ( !nsp ) {
+          CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid attribute in pending signal confirmation");
+          goto again;
+        }
+
+        has_ns = 1;
+        memcpy(&tgt.ns, nsp, sizeof(tgt.ns));
+        tgt.ns = ntohl(tgt.ns);
+      }
+      break;
+
+    case CLUSTERD_ATTR_PROCESS:
+      if ( has_ps ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has duplicate process. Ignoring");
+      } else if ( ntohs(attr->alen) != sizeof(tgt.ps) ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has too short process id. Ignoring");
+      } else {
+        void *psp = CLUSTERD_ATTR_DATA(attr, buf->base, &req);
+        if ( !psp ) {
+          CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid attribute in pending signal confirmation");
+          goto again;
+        }
+
+        has_ps = 1;
+        memcpy(&tgt.ps, psp, sizeof(tgt.ps));
+        tgt.ps = ntohl(tgt.ps);
+      }
+      break;
+
+    default:
+      if ( CLUSTERD_ATTR_OPTIONAL(ntohs(attr->atype)) ) continue;
+      else {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Unknown attribute type %04x is not optional. Tossing signal confirmation",
+                     ntohs(attr->atype));
+        goto again;
+      }
+    }
+  }
+
+  if ( !has_ps || !has_ns ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Cannot process signal confirmation: process or namespace missing");
+    goto again;
+  }
+
+  HASH_FIND(hh, g_service->pending_signals, &tgt, sizeof(tgt), psig);
+  if ( psig ) {
+    // Pending signal is acknowledged
+    remove_pending_signal(psig);
+  }
+
+ again:
+  process_psig_confirmations();
+  return;
+}
+
+static void reuse_psig_buffer(uv_handle_t *hdl, size_t suggsz, uv_buf_t *buf) {
+  static char psigbuf[4096];
+  size_t sz = suggsz;
+
+  if ( sz > sizeof(psigbuf) )
+    sz = sizeof(psigbuf);
+
+  buf->base = psigbuf;
+  buf->len = sz;
+}
+
+static void process_psig_confirmations() {
+  int err;
+
+  err = uv_udp_recv_start(&g_service->udp, reuse_psig_buffer, parse_psig_confirmation);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not receive on PSIG socket: %s", uv_strerror(err));
+  }
+}
+
 static void free_service(uv_handle_t *h) {
   controller_service *svc = CLUSTERD_STRUCT_FROM_FIELD(controller_service, tcp, h);
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Freeing service");
@@ -1216,6 +1572,13 @@ static int start_local_service(char *srvaddrstr, struct raft *raft, uv_loop_t *l
 
   g_service->raft = raft;
   g_service->processing_head = g_service->processing_tail = NULL;
+  g_service->pending_signals = NULL;
+
+  err = uv_udp_init(loop, &g_service->udp);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not initialize service UDP: %s", uv_strerror(err));
+    return -1;
+  }
 
   err = uv_tcp_init(loop, &g_service->tcp);
   if ( err < 0 ) {
@@ -1236,6 +1599,8 @@ static int start_local_service(char *srvaddrstr, struct raft *raft, uv_loop_t *l
     uv_close((uv_handle_t *)&g_service->tcp, free_service);
     return -1;
   }
+
+  process_psig_confirmations();
 
   return 0;
 }

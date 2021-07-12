@@ -29,6 +29,7 @@
 #include <raft.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -54,6 +55,8 @@ static struct raft_apply g_raft_apply;
 #define CLUSTERD_TX_VERSION       1
 
 void clusterd_next_write(int status, void *result);
+int clusterd_enqueue_signal(clusterd_namespace_t ns, clusterd_pid_t ps, int sigswaiting,
+                            struct sockaddr_storage *node);
 
 static int clusterd_tx_ensure_transaction() {
   int err;
@@ -212,6 +215,28 @@ static int db_schema_cb(void *ud, int ncols, char **vals, char **cols) {
   return SQLITE_OK;
 }
 
+static void clusterd_sqlfn_signal_matches(sqlite3_context *ctx, int narg, sqlite3_value **args) {
+  int err;
+  const char *pat, *haystack;
+
+  if ( narg != 2 ) {
+    sqlite3_result_error(ctx, "clusterd_signal_matches requires two arguments", -1);
+    return;
+  }
+
+  pat = sqlite3_value_text(args[0]);
+  haystack = sqlite3_value_text(args[1]);
+
+  err = fnmatch(pat, haystack, FNM_NOESCAPE | FNM_CASEFOLD | FNM_EXTMATCH);
+  if ( err == 0 )
+    sqlite3_result_int(ctx, 1);
+  else if ( err == FNM_NOMATCH )
+    sqlite3_result_int(ctx, 0);
+  else {
+    sqlite3_result_error(ctx, "clusterd_signal_matches internal error", -1);
+  }
+}
+
 static sqlite3 *clusterd_do_open(const char *path) {
   sqlite3 *db;
   char *errmsg;
@@ -227,6 +252,15 @@ static sqlite3 *clusterd_do_open(const char *path) {
   if ( err != SQLITE_OK ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not begin DDL transaction: %s", errmsg);
     sqlite3_free(errmsg);
+    sqlite3_close(db);
+    return NULL;
+  }
+
+  // custom functions
+  err = sqlite3_create_function(db, "clusterd_signal_matches", 2, SQLITE_DETERMINISTIC | SQLITE_UTF8, NULL,
+                                clusterd_sqlfn_signal_matches, NULL, NULL);
+  if ( err != SQLITE_OK ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create clusterd_signal_matches function: %s", sqlite3_errstr(err));
     sqlite3_close(db);
     return NULL;
   }
@@ -734,6 +768,35 @@ static int clusterd_lua_is_valid_ip(lua_State *lua) {
   return 1;
 }
 
+static int clusterd_lua_queue_signal_notification(lua_State *lua) {
+  int nargs, sigswaiting, err;
+  clusterd_namespace_t nsid;
+  clusterd_pid_t psid;
+  const char *nip;
+  struct sockaddr_storage naddr;
+
+  nargs = lua_gettop(lua);
+  if ( nargs != 4 )
+    return luaL_error(lua, "api.queue_signal_notification requires four arguments");
+
+  nsid = lua_tointeger(lua, 1);
+  psid = lua_tointeger(lua, 2);
+  sigswaiting = lua_tointeger(lua, 3);
+  nip = lua_tostring(lua, 4);
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Scheduling notification for process " PID_F "(ns=" NS_F "): %s",
+               psid, nsid, nip);
+
+  // Enqueue the notification
+  err = clusterd_addr_parse(nip, &naddr, 0);
+  if ( err != 0 )
+    return luaL_error(lua, "api.queue_signal_notification: node ip %s is invalid", nip);
+
+  err = clusterd_enqueue_signal(nsid, psid, sigswaiting, &naddr);
+  if ( err < 0 )
+    return luaL_error(lua, "api.queue_signal_notification: internal error");
+}
+
 #define REGISTER_FUNC(name, func)               \
   lua_pushcfunction(lua, (func));               \
   lua_setfield(lua, -2, (name));
@@ -754,6 +817,7 @@ int luaopen_clusterd(lua_State *lua) {
 
   REGISTER_FUNC("run", clusterd_lua_run);
   REGISTER_FUNC("is_valid_ip", clusterd_lua_is_valid_ip);
+  REGISTER_FUNC("queue_signal_notification", clusterd_lua_queue_signal_notification);
 
   lua_setglobal(lua, "internal");
 

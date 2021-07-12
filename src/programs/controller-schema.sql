@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS node
   , n_ip          TEXT NOT NULL
   , n_state       TEXT NOT NULL
 
+  , n_monitor_avail BOOLEAN NOT NULL DEFAULT true -- Whether or not monitoring is available on this host
+
   , CONSTRAINT n_state_enum
       CHECK (n_state IN ('up', 'down'))
   );
@@ -184,7 +186,7 @@ CREATE TABLE IF NOT EXISTS global_resource_assignment
   -- have to be scheduled on this node
   , gra_enforce_affinity BOOLEAN NOT NULL
 
-  , PRIMARY KEY (gra_ns, gra_resource, gra_rel)
+  , PRIMARY KEY (gra_ns, gra_resource, gra_rel, gra_node)
   , CONSTRAINT gra_namespace_fk
       FOREIGN KEY (gra_ns)
       REFERENCES namespace(ns_id)
@@ -209,6 +211,7 @@ CREATE TABLE IF NOT EXISTS global_resource_claim
   , grc_resource TEXT NOT NULL
   , grc_process  INTEGER NOT NULL
 
+  , PRIMARY KEY (grc_ns, grc_resource, grc_process)
   , CONSTRAINT gra_process_fk
       FOREIGN KEY (grc_ns, grc_process)
       REFERENCES process(ps_ns, ps_id)
@@ -257,5 +260,65 @@ CREATE TABLE IF NOT EXISTS endpoint_name
   , CONSTRAINT epn_endpoint_fk
       FOREIGN KEY (epn_ns, epn_id)
       REFERENCES endpoint(ep_ns, ep_id)
+      ON DELETE CASCADE
+  );
+
+-- Signals are enqueued messages that are sent to specific
+-- processes. Signals are delivered to a process by sending a signal
+-- using the same technique as clusterd-kill (send a message to the
+-- host's monitor to kill the process).
+--
+-- When a signal has successfully been flagged, a bit is set, but the
+-- signal is not removed. A signal is removed when a process calls
+-- clusterd.set_signal_mark, which sets the id of the last signal
+-- received.
+
+CREATE TABLE IF NOT EXISTS enqueued_signal
+  ( enqsig_ns INTEGER NOT NULL
+  , enqsig_ps INTEGER NOT NULL
+
+  , enqsig_pos INTEGER NOT NULL
+
+  , enqsig_signal TEXT NOT NULL
+
+  -- Set to true if the clusterd-kill operation has succeeded after
+  -- this signal was enqueued.
+  , enqsig_flagged BOOLEAN NOT NULL
+
+  , PRIMARY KEY (enqsig_ns, enqsig_ps, enqsig_pos)
+  , CONSTRAINT enqsig_process_fk
+      FOREIGN KEY (enqsig_ns, enqsig_ps)
+      REFERENCES process(ps_ns, ps_id)
+      ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS process_sigmask
+  ( pssig_ns INTEGER NOT NULL
+  , pssig_ps INTEGER NOT NULL
+  , pssig_id INTEGER NOT NULL
+
+  , pssig_mask TEXT NOT NULL
+
+  , PRIMARY KEY (pssig_ns, pssig_ps, pssid_id)
+
+  , CONSTRAINT pssig_process_fk
+      FOREIGN KEY (pssig_ns, pssig_ps)
+      REFERENCES process(ps_ns, ps_id)
+      ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS process_monitor
+  ( psmon_ns INTEGER NOT NULL
+  , psmon_ps INTEGER NOT NULL
+  , psmon_node TEXT NOT NULL
+
+  , CONSTRAINT psmon_node_fk
+      FOREIGN KEY (psmon_node)
+      REFERENCES node(n_id)
+      ON DELETE CASCADE
+
+  , CONSTRAINT psmon_process_fk
+      FOREIGN KEY (psmon_ns, psmon_ps)
+      REFERENCES process(ps_ns, ps_id)
       ON DELETE CASCADE
   );

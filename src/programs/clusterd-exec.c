@@ -37,7 +37,15 @@
 #include <time.h>
 #include <sys/wait.h>
 
+#define MAX_ARGS 128
+#define MIN_MONITORS 3 // Minimum number of monitors for high availability
+
 int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
+
+typedef struct clusterd_monitor {
+  struct clusterd_monitor *next;
+  const char *monitor_spec;
+} clusterd_monitor;
 
 typedef enum
   { CLUSTERD_LOCAL_AVAILABILITY = 0,
@@ -73,11 +81,17 @@ static const char *create_process_lua =
 static const char *kill_process_lua =
   "clusterd.kill_process(params.namespace, tonumber(params.pid))\n";
 
+clusterd_monitor *g_monitors = NULL;
+unsigned long g_monitors_desired = MIN_MONITORS;
+
+static int add_monitor(const char *monitor);
+
 static void usage() {
   fprintf(stderr, "clusterd-exec -- schedule and execute a clusterd process\n");
   fprintf(stderr, "Usage: clusterd-exec -vhHiI [-n NAMESPACE] [-N RETRIES] [-l RESOURCE=REQUEST...]\n");
   fprintf(stderr, "         [-w CONDITION] SERVICE [args...]\n\n");
-  fprintf(stderr, "   -H            Run the process with high-availability\n");
+  fprintf(stderr, "   -L            Run the process without high-availability\n");
+  fprintf(stderr, "   -H NUMBER     Run in high availability, with optional number of desired monitors\n");
   fprintf(stderr, "   -n NAMESPACE  Use the given namespace for service lookup and deployment\n");
   fprintf(stderr, "   -N RETRIES    If the process dies, retry it this many times in a row\n");
   fprintf(stderr, "                 before failing permanently\n");
@@ -85,6 +99,7 @@ static void usage() {
   fprintf(stderr, "                 Request additional resources, overriding requirements from\n");
   fprintf(stderr, "                 the controller\n");
   fprintf(stderr, "   -w CONDITION  Wait for the service to reach some state before exiting\n");
+  fprintf(stderr, "   -m MONITOR    Use the given node (specified by hostname, IP, or node ID) as a monitor\n");
   fprintf(stderr, "   -d            Run the host process in debug mode (logs output to a logging directory)\n");
   fprintf(stderr, "   -i            Redirect the stdout of the process onto the current terminal\n");
   fprintf(stderr, "   -I            Redirect both stdin and stdout of the process to the current terminal\n");
@@ -133,7 +148,7 @@ static const char *sample_nodes(FILE *schedule) {
   static char chosennode[256];
   char nodeline[1024], nodeid[37], hostname[256];
   double last_score = NAN;
-  int nodes_examined = 0;
+  int nodes_examined = 0, err;
 
   while ( fgets(nodeline, sizeof(nodeline), schedule) != NULL ) {
     int n, r;
@@ -146,10 +161,8 @@ static const char *sample_nodes(FILE *schedule) {
     }
 
     if ( last_score == last_score &&
-         next_score < last_score ) {
-      // Done with node choices
-      return chosennode;
-    }
+         next_score < last_score )
+      break;
 
     if ( last_score != last_score ) { // No nodes seen
       last_score = next_score;
@@ -159,13 +172,53 @@ static const char *sample_nodes(FILE *schedule) {
 
     r = randomint(1, nodes_examined);
 
-    if ( r <= 1 )
+    if ( r <= 1 ) {
+      // Add this monitor if we need to
+      if ( g_monitors_desired > 0 ) {
+        const char *nodestr = strdup(chosennode);
+        if ( !nodestr ) {
+          CLUSTERD_LOG(CLUSTERD_WARNING, "Out of memory copying %s", chosennode);
+        } else {
+          err = add_monitor(chosennode);
+          if ( err < 0 ) {
+            CLUSTERD_LOG(CLUSTERD_WARNING, "Could not add monitor %s", chosennode);
+          }
+        }
+      }
+
       // Replace node
       strncpy(chosennode, hostname, sizeof(chosennode));
+    }
   }
 
-  if ( last_score == last_score )
+  if ( last_score == last_score ) {
+    while ( g_monitors_desired > 0 &&
+            fgets(nodeline, sizeof(nodeline), schedule) != NULL ) {
+      const char *monitor;
+      double next_score;
+
+      // Add any remaining node as monitors
+      err = sscanf(nodeline, "%37s %256s %lf", nodeid, hostname, &next_score);
+      if ( err != 3 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline while processin monitors, ignoring: %s", nodeline);
+        continue;
+      }
+
+      monitor = strdup(nodeid);
+      if ( !monitor ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Out of memory copying %s", nodeid);
+        continue;
+      }
+
+      err = add_monitor(monitor);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Could not add monitor %s", monitor);
+        continue;
+      }
+    }
+
     return chosennode;
+  }
 
   CLUSTERD_LOG(CLUSTERD_ERROR, "No nodes available for scheduling");
   return NULL;
@@ -357,6 +410,7 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
   char ourname[HOST_NAME_MAX + 1], pidstr[32];
   int err, argind = 0, sts[2];
   pid_t child;
+  clusterd_monitor *m;
 
   err = snprintf(pidstr, sizeof(pidstr), PID_F, pid);
   if ( err >= sizeof(pidstr) ) {
@@ -375,7 +429,7 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
     return err;
   }
 
-  new_argv = calloc(argc + 64 + 1, sizeof(char *));
+  new_argv = calloc(argc + MAX_ARGS + 1, sizeof(char *));
   if ( !new_argv ) goto nomem;
 
   if ( strncmp(ourname, nodeaddr, sizeof(ourname)) == 0 ) {
@@ -404,6 +458,13 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
   new_argv[argind++] = pidstr;
   new_argv[argind++] = "-n";
   new_argv[argind++] = namespace;
+
+  // For each monitor, add the monitor arguments
+  for ( m = g_monitors; m; m = m->next ) {
+    new_argv[argind++] = "-m";
+    new_argv[argind++] = m->monitor_spec;
+  }
+
   new_argv[argind++] = service;
   new_argv[argind++] = "--";
   memcpy(new_argv, argv, sizeof(*new_argv) * argc);
@@ -473,6 +534,27 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
   return -1;
 }
 
+static int add_monitor(const char *monitor) {
+  clusterd_monitor *m;
+
+  m = malloc(sizeof(*m));
+  if ( !m ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not allocate space for monitor");
+    errno = ENOMEM;
+    return -1;
+  }
+
+  m->monitor_spec = monitor;
+  m->next = g_monitors;
+
+  g_monitors = m;
+
+  if ( g_monitors_desired > 0 )
+    g_monitors_desired--;
+
+  return 0;
+}
+
 int main(int argc, char *const *argv) {
   int c;
   const char *namespace = "default", *service = NULL, *pinnednode = NULL,
@@ -480,7 +562,7 @@ int main(int argc, char *const *argv) {
   char *end;
   int retries, firstarg = -1, redirect_stdout = 0, redirect_stdin = 0, keep_logs = 0, err;
   clusterd_exec_wait wait_condition = CLUSTERD_EXEC_NO_WAIT;
-  clusterd_exec_availability availability = CLUSTERD_LOCAL_AVAILABILITY;
+  clusterd_exec_availability availability = CLUSTERD_HIGH_AVAILABILITY;
 
   clusterd_pid_t pid;
   clusterctl ctl;
@@ -490,7 +572,7 @@ int main(int argc, char *const *argv) {
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
 
-  while ( (c = getopt(argc, argv, "-n:N:l:w:iIvhHLd")) != -1 ) {
+  while ( (c = getopt(argc, argv, "-:n:N:l:w:m:iIvhLH:d")) != -1 ) {
     switch ( c ) {
     case 1:
       if ( optarg[0] == '@' ) {
@@ -515,6 +597,14 @@ int main(int argc, char *const *argv) {
       }
       break;
 
+    case 'm':
+      err = add_monitor(optarg);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not add monitor %s", optarg);
+        return 1;
+      }
+      break;
+
     case 'n':
       namespace = optarg;
       break;
@@ -535,6 +625,15 @@ int main(int argc, char *const *argv) {
 
     case 'H':
       availability = CLUSTERD_HIGH_AVAILABILITY;
+      err = sscanf(optarg, "%lu", &g_monitors_desired);
+      if ( err != 1 ) {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "-H expects a number as an argument, got %s", optarg);
+        return 1;
+      }
+      break;
+
+    case 'L':
+      availability = CLUSTERD_LOCAL_AVAILABILITY;
       break;
 
     case 'd':
@@ -564,6 +663,19 @@ int main(int argc, char *const *argv) {
     case 'h':
       usage();
       return 0;
+
+    case ':':
+      switch (optopt) {
+      case 'H':
+        availability = CLUSTERD_HIGH_AVAILABILITY;
+        break;
+
+      default:
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Option -%c requires an argument", optopt);
+        usage();
+        return 1;
+      }
+      break;
 
     default:
       usage();
@@ -645,6 +757,8 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not launch service: %s", strerror(errno));
     goto cleanup;
   }
+
+  // Now ideally, we'll
 
   return 0;
 

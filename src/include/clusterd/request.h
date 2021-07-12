@@ -8,6 +8,8 @@
 // Clusterd requests
 #define CLUSTERD_OP_MONITOR     0x0100
 #define CLUSTERD_OP_MONITOR_ACK 0x0101
+#define CLUSTERD_OP_SIG_NOTIFY  0x0200
+#define CLUSTERD_OP_SIG_ACK     0x0201
 
 // Clusterd attributes
 #define CLUSTERD_ATTR_NAMESPACE  0x0001
@@ -17,10 +19,20 @@
 #define CLUSTERD_ATTR_MONITOR_V6 0x0005
 #define CLUSTERD_ATTR_INTERVAL   0x0006
 #define CLUSTERD_ATTR_COOKIE     0x0007
+#define CLUSTERD_ATTR_SIGORDINAL 0x0008
+#define CLUSTERD_ATTR_ERROR      0x0009
 
 #define CLUSTERD_ATTR_OPTIONAL_F 0x8000
 
 #define CLUSTERD_ATTR_OPTIONAL(t) (((t) & CLUSTERD_ATTR_OPTIONAL_F) != 0)
+
+// Clusterd errors
+#define CLUSTERD_ERR_PROC_NOT_FOUND 0x0001
+
+#define CLUSTERD_HTON_ERROR(err) htons(err)
+#define CLUSTERD_NTOH_ERROR(err) ntohs(err)
+
+typedef uint16_t clusterd_error_attr;
 
 typedef struct {
   uint16_t op;

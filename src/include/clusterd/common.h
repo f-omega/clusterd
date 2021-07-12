@@ -88,6 +88,29 @@ static inline int clusterd_addrcmp(struct sockaddr_storage *a, struct sockaddr_s
   }
 }
 
+static inline int clusterd_addr_normalize(struct sockaddr_storage *daddr, struct sockaddr *addr) {
+  memset(daddr, 0, sizeof(*daddr));
+
+  if ( addr->sa_family == AF_INET ) {
+    struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+    struct sockaddr_in *sout = (struct sockaddr_in *)daddr;
+
+    sout->sin_family = AF_INET;
+    memcpy(&sout->sin_addr, &sin->sin_addr, sizeof(sout->sin_addr));
+    sout->sin_port = sin->sin_port;
+    return 0;
+  } else if ( addr->sa_family == AF_INET6 ) {
+    struct sockaddr_in6 *sin = (struct sockaddr_in6 *)addr;
+    struct sockaddr_in6 *sout = (struct sockaddr_in6 *)daddr;
+
+    sout->sin6_family = AF_INET6;
+    memcpy(&sout->sin6_addr, &sin->sin6_addr, sizeof(sout->sin6_addr));
+    sout->sin6_port = sin->sin6_port;
+    return 0;
+  } else
+    return -1;
+}
+
 static inline void clusterd_addr_render(char *addrstr, const struct sockaddr *addr, int include_port) {
   switch ( addr->sa_family ) {
   case AF_INET:
@@ -118,6 +141,7 @@ static inline int clusterd_addr_parse(char *addrstr, struct sockaddr_storage *ss
   uint16_t *portptr;
   int err;
 
+  memset(ss, 0, sizeof(*ss));
   ss->ss_family = AF_UNSPEC;
 
   if ( *addrstr == '[' ) {

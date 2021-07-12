@@ -194,10 +194,16 @@ function clusterd.update_node(node, options)
    api.log(api.debug, "Would update " .. node .. "(hostname=" .. options.hostname or "none" ..
               ", ip=" .. options.ip .. ")")
 
+   monitor_avail = true
+   if options.monitor_available ~= nil then
+     assert(type(options.monitor_available) == "boolean", "monitor_available attribute must be a boolean if given")
+     monitor_avail = options.monitor_available
+   end
+
    _, err = api.run(
-      [[REPLACE INTO node(n_id, n_hostname, n_ip, n_state)
-        VALUES ($id, $hostname, $ip, 'up')]],
-      {id = node, hostname = options.hostname, ip = options.ip })
+      [[REPLACE INTO node(n_id, n_hostname, n_ip, n_state, n_monitor_avail)
+        VALUES ($id, $hostname, $ip, 'up', $monitor)]],
+      {id = node, hostname = options.hostname, ip = options.ip, monitor = monitor_avail })
    if err ~= nil then
       error("Could not perform node replace: " .. err)
    end
@@ -352,7 +358,7 @@ function clusterd.list_nodes(opts)
    end
 
    res, err = api.run(
-      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip]] .. qextraproj ..
+      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip, n_monitor_avail AS monitor_avail]] .. qextraproj ..
       [[ FROM node]] .. qextra,
       qargs
    )
@@ -365,7 +371,7 @@ end
 
 function clusterd.get_node(nid)
    res, err = api.run(
-      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip FROM node WHERE n_id=$id]],
+      [[SELECT node.ROWID as number, n_id AS id, n_hostname AS hostname, n_ip AS ip, n_monitor_avail AS monitor_avail FROM node WHERE n_id=$id]],
       { id = nid }
    )
    if err ~= nil then
@@ -373,7 +379,7 @@ function clusterd.get_node(nid)
    end
 
    if #res == 0 then
-      error('node ' .. nid .. ' not found')
+      return nil
    end
 
    return res[1]
@@ -775,6 +781,11 @@ function clusterd.new_process(ns, svc, options)
       error('could not create new process entry ' .. err)
    end
 
+   -- If there's a SIGMASK associated with the process, apply it
+   if options.sigmask ~= nil or options.monitors ~= nil then
+     clusterd.update_process(new_pid, { sigmask = options.sigmask, monitors = options.monitors })
+   end
+
    return new_pid
 end
 
@@ -855,10 +866,44 @@ function clusterd.get_process(ns, pid)
       { pid = psid, ns = nsid }
    )
    if err ~= nil or #res ~= 1 then
+      api.log(api.debug, 'Could not query process: ' .. err)
       return nil
    end
 
-   return res[1]
+   ps = res[1]
+
+   sigmask, err = api.run(
+     [[SELECT pssig_mask AS mask FROM process_sigmask
+       WHERE pssig_ns = $ns AND pssig_ps = $ps
+       ORDER BY pssig_id ASC]],
+     { ns = nsid, ps = psid }
+   )
+   if err ~= nil then
+     error('could not get process sigmask for process ' .. tostring (psid) ..
+           ' in namespace ' .. tostring(nsid) .. ': ' .. err)
+   end
+
+   ps.sigmask = {}
+   for _, m in ipairs(sigmask) do
+     table.insert(ps.sigmask, m.mask)
+   end
+
+   monitors, err = api.run(
+     [[SELECT psmon_node AS node FROM process_monitor
+       WHERE psmon_ns = $ns AND psmon_ps = $ps]],
+     { ns = nsid, ps = psid }
+   )
+   if err ~= nil then
+     error('could not get monitors for process ' .. tostring(psid) ..
+           ' in namespace ' .. tostring(nsid) .. ': ' .. err)
+   end
+
+   ps.monitors = {}
+   for _, m in ipairs(monitors) do
+     table.insert(ps.monitors, m.node)
+   end
+
+   return ps
 end
 
 function clusterd.delete_process(ns, pid)
@@ -908,6 +953,85 @@ function clusterd.update_process(ns, pid, options)
       if err ~= nil then
          error('could not update process state: ' .. err)
       end
+   end
+
+   if options.sigmask ~= nil then
+      assert(type(options.sigmask) == "table", "process sigmask must be a list of signal patterns")
+      assert(options.sigmaskop == nil or options.sigmaskop == 'update' or
+             options.sigmaskop == 'replace', "sigmask operation must be update or replace")
+      if options.sigmaskop == nil then
+        options.sigmaskop == 'replace'
+      end
+
+      if options.sigmaskop == 'replace' then
+        _, err = api.run(
+          [[DELETE FROM process_sigmask WHERE pssig_ns=$ns AND pssig_ps=$ps]],
+          { ns = process.ps_ns, ps = process.ps_id }
+        )
+        if err ~= nil then
+          error('could not clear process signal mask: ' .. err)
+        end
+      end
+
+      res, err = api.run(
+        [[SELECT COALESCE(MAX(pssig_id), 0) AS lastid
+          FROM process_sigmask
+          WHERE pssig_ns=$ns AND pssig_ps=$ps]],
+        { ns = process.ps_ns, ps = process.ps_id }
+      )
+      if err ~= nil then
+        error('could not get last signal mask id: ' .. err)
+      end
+
+      last_sigmask_id = 0
+      if #res == 1 then
+        last_sigmask_id = res[1].lastid + 1
+      end
+
+      for _, pattern in ipairs(options.sigmask) do
+        _, err = api.run(
+          [[INSERT INTO process_sigmask(pssig_ns, pssig_ps, pssig_id, pssig_mask)
+            VALUES ($ns, $ps, $smid, $pattern)]],
+          { ns = process.ps_ns, ps = process.ps_id, smid = last_sigmask_id,
+            pattern = pattern }
+        )
+        if err ~= nil then
+          error('could not add signal mask ' .. pattern .. ': ' .. err)
+        end
+
+        -- Increment the ID
+        last_sigmask_id = last_sigmask_id + 1
+      end
+   end
+
+   if options.monitors ~= nil then
+     assert(type(options.monitors) == "table", "process monitor list must be a table")
+
+     _, err = api.run(
+        [[DELETE FROM process_monitor WHERE psmon_ns=$ns AND psmon_ps=$ps]],
+        { ns = process.ps_ns, ps = process.ps_id }
+     )
+     if err ~= nil then
+       error('could not clear old monitor list: " .. err)
+     end
+
+     for _, monitor in ipairs(options.monitors) do
+       assert(type(monitor) == "string", "process monitors must be a string of the node id, hostname, or IP")
+
+       node = clusterd.resolve_node(monitor)
+       if node == nil then
+         error('node ' .. monitor .. ' not found')
+       end
+
+       _, err = api.run(
+         [[INSERT INTO process_monitor(psmon_ns, psmon_ps, psmon_node)
+           VALUES ($ns, $ps, $node)]],
+         { ns = process.ps_ns, ps = process.ps_id, node = node }
+       )
+       if err ~= nil then
+         error('could not add monitor ' .. monitor .. ': ' .. err)
+       end
+     end
    end
 
    -- TODO need to use authentication or something to set placement
@@ -1463,6 +1587,176 @@ function clusterd.get_endpoint(ns, ep)
 
   ret.claims = res
   return ret
+end
+
+------------------------------------------
+-- Signals                              --
+------------------------------------------
+
+function clusterd.send_signal(ns, pid, signal)
+  assert(ns ~= nil, 'namespace must be provided to send signal')
+  assert(pid ~= nil, 'process must be provided to send signal')
+  assert(signal ~= nil and type(signal) == "string", 'signal spec must be a string')
+
+  ps = clusterd.resolve_process(ns, pid)
+  if ps == nil then
+    error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' does not exist')
+  end
+
+  -- Check if any pattern matches
+  res, err = api.run(
+    [[SELECT EXISTS(SELECT pssig_mask AS pattern FROM process_sigmask
+                    WHERE pssig_ns=$ns AND pssig_ps=$ps AND
+                          clusterd_signal_matches(pattern, $sig))
+             AS should_deliver]],
+    { ns = ps.ps_ns, ps = ps.ps_id, sig = signal }
+  )
+  if err ~= nil then
+    error('could not lookup signal mask: ' .. err)
+  end
+
+  if #res ~= 1 then
+    return false
+  end
+
+  if not res[1].should_deliver then
+    return false
+  end
+
+  -- Deliver the signal
+  res, err = api.run(
+    [[SELECT COALESCE(MAX(enqsig_pos), 0) AS lastid FROM enqueued_signal
+      WHERE enqsig_ns=$ns AND enqsig_ps=$ps]],
+    { ns = ps.ps_ns, ps = ps.ps_id }
+  )
+  if err ~= nil then
+    error('could not get last enqueued signal position: ' .. err)
+  end
+
+  next_signal_pos = 1
+  if #res ~= 0 then
+    next_signal_pos = res[1].lastid + 1
+  end
+
+  _, err = api.run(
+    [[INSERT INTO enqueued_signal(enqsig_ns, enqsig_ps, enqsig_pos, enqsig_signal, enqsig_flagged)
+      VALUES ($ns, $ps, $pos, $sig, FALSE)]],
+    { ns = ps.ps_ns, ps = ps.ps_id, pos = next_signal_pos, sig = signal }
+  )
+  if err ~= nil then
+    error('could not enqueue signal: ' .. err)
+  end
+
+  res, err = api.run(
+    [[SELECT COUNT(*) AS pending FROM enqueued_signal
+      WHERE enqsig_ns=$ns AND enqsig_ps=$ps AND NOT enqsig_flagged]]
+    { ns = ps.ps_ns, ps = ps.ps_id }
+  )
+  if err ~= nil then
+    error('could not count pending signals: ' .. err)
+  end
+
+  if #res ~= 1 then
+    error('too many results returned when counting pending signals')
+  end
+
+  sigswaiting = res[1].pending
+
+  -- Now we need to signal to the process that this process's monitors
+  -- need to be contacted to deliver the signal.
+  if ps.ps_placement ~= nil then
+    node = clusterd.get_node(ps.ps_placement)
+    if node ~= nil then
+      error('process ' .. tostring(ps.ps_id) .. ' in namespace ' .. tostring(ps.ps_ns) ..
+            ' has an invalid placement: ' .. ps.ps_placement)
+    end
+
+    api.queue_signal_notification(ps.ps_ns, ps.ps_id, sigswaiting, node.ip)
+  end
+
+  return true
+end
+
+function clusterd.get_signal_queue(ns, pid)
+  assert(ns ~= nil, 'namespace must be provided to send signal')
+  assert(pid ~= nil, 'process must be provided to send signal')
+
+  ps = clusterd.resolve_process(ns, pid)
+  if ps == nil then
+    error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' not found')
+  end
+
+  res, err = api.run(
+    [[SELECT COALESCE(MAX(enqsig_pos), 0) AS latest_signal,
+             COALESCE(MAX(CASE WHEN enqsig_flagged THEN enqsig_pos ELSE 0), 0) AS last_signal
+      FROM enqueued_signal
+      WHERE enqsig_ns = $ns AND enqsig_ps = $ps]],
+    { ns = ps.ps_ns, ps = ps.ps_id }
+  )
+  if err ~= nil then
+    error('could not get signal queue: ' .. err)
+  end
+
+  if #res ~= 1 then
+   return { last_signal = 0, latest_signal = 0 }
+  else
+   return res[1]
+  end
+end
+
+function clusterd.mark_signal(ns, pid, sigord)
+  assert(ns ~= nil, 'namespace must be provided to mark signals')
+  assert(pid ~= nil, 'process must be provided to mark signals')
+  assert(sigord ~= nil and type(sigord) == 'number', 'signal ordinal must be a number')
+
+  ps = clusterd.resolve_process(ns, pid)
+  if ps == nil then
+    error('process ' .. tostring(pid) .. ' not found in namespace ' .. tostring(ns))
+  end
+
+  _, err = api.run(
+    [[UPDATE enqueued_signal
+      SET enqsig_flagged=true
+      WHERE enqsig_ns = $ns AND
+            enqsig_ps = $ps AND
+            enqsig_pos < $ord]],
+     { ns = ps.ps_ns, ps = ps.ps_id,
+       ord = sigord }
+  )
+
+  if err ~= nil then
+    error("could not mark signals: " .. err)
+  end
+end
+
+function clusterd.next_signal(ns, pid)
+  assert(ns ~= nil, 'namespace must be provided to get signal')
+  assert(pid ~= nil, 'process must be provided to get signal')
+
+  ps = clusterd.resolve_process(ns, pid)
+  if ps == nil then
+    error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' not found')
+  end
+
+  res, err = api.run(
+    [[SELECT enqsig_signal AS signal
+      FROM   enqueued_signal
+      WHERE  enqsig_ns = $ns
+        AND  enqsig_ps = $ps
+        AND NOT enqsig_flagged
+      ORDER BY enqsig_pos ASCENDING
+      LIMIT 1]],
+    { ns = ps.ps_ns, ps = ps.ps_id }
+  )
+  if err ~= nil then
+   error('could not get next signal: ' .. err)
+  end
+
+  if #res ~= 1 then
+    return nil
+  end
+
+  return res[1]
 end
 
 return clusterd

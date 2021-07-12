@@ -27,6 +27,7 @@
 #include "config.h"
 #include "libclusterctl.h"
 
+#include <jansson.h>
 #include <string.h>
 #include <time.h>
 #include <libgen.h>
@@ -107,7 +108,7 @@ sig_atomic_t   g_down_signal = -1;
 
 int                g_socket4 = -1;
 int                g_socket6 = -1;
-int             g_max_socket = 0;
+int             g_max_socket = -1;
 int       g_max_mon_failures = 3;
 int      g_cooloff_period_ms = 1000;
 
@@ -127,8 +128,14 @@ int            g_hosterr_fd = -1;
 
 const char    *g_clusterd_hostname = NULL;
 
-unsigned int g_ping_interval = CLUSTERD_DEFAULT_PING_INTERVAL;
-FILE *g_urandom = NULL;
+unsigned int   g_ping_interval = CLUSTERD_DEFAULT_PING_INTERVAL;
+FILE          *g_urandom = NULL;
+
+uint32_t       g_sigordinal = 0; // Latest signal available
+uint32_t       g_sigordinal_last = 0; // Last sgnal delivered
+
+pid_t          g_sigdelivery_pid = -1;
+int            g_sigdelivery_pipe[2];
 
 const char *get_service_path_lua =
   "ns_id = clusterd.resolve_namespace(params.namespace)\n"
@@ -153,6 +160,27 @@ const char *remove_process_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
   "clusterd.delete_process(nsid, pid)\n";
+
+const char *mark_all_signals_lua =
+  "q = clusterd.get_signal_queue(params.namespace, params.process)\n"
+  "if q == nil then\n"
+  "  error('could not get signal queue for process')\n"
+  "end\n"
+  "if q.latest_signal ~= nil then\n"
+  "  clusterd.mark_signal(params.namespace, params.process, q.latest_signal)\n"
+  "end\n";
+
+const char *get_next_signal_lua =
+  "sigordinal = tonumber(params.sigordinal)\n"
+  "q = clusterd.get_signal_queue(params.namespace, params.process)\n"
+  "if q == nil then \n"
+  "  error('could not get signal queue for process')\n"
+  "end\n"
+  "if sigordinal > q.last_signal then\n"
+  "  clusterd.mark_signal(params.namespace, params.process, sigordinal)\n"
+  "end\n"
+  "sig = clusterd.next_signal(params.namespace, params.process)\n"
+  "clusterd.output(json.encode(sig))\n";
 
 static void usage() {
   fprintf(stderr, "clusterd-host - supervise a clusterd process\n");
@@ -697,6 +725,9 @@ static int add_monitor(char *addrstr) {
 
   m->local_sk = *sk;
 
+  if ( m->local_sk > g_max_socket )
+    g_max_socket = m->local_sk;
+
   return 0;
 }
 
@@ -717,6 +748,50 @@ static int drop_privileges() {
   err = setuid(g_root_uid);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not setuid(%u): %s", g_root_uid, strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
+static void setup_service_env() {
+  char ns_path[PATH_MAX];
+  char idstr[32];
+
+  strncpy(ns_path, g_ps_path, sizeof(ns_path));
+  dirname(ns_path);
+
+  // TODO determine if we really need this. We probably need to keep some clusterd_ variables around
+  //clearenv();
+
+  setenv("CLUSTERD_NS_DIR", ns_path, 1);
+  setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
+
+  snprintf(idstr, sizeof(idstr), NS_F, g_nsid);
+  setenv("CLUSTERD_NAMESPACE", idstr, 1);
+  snprintf(idstr, sizeof(idstr), PID_F, g_pid);
+  setenv("CLUSTERD_PID", idstr, 1);
+
+  setenv("CLUSTERD_HOST", g_clusterd_hostname, 1);
+
+  if ( CLUSTERD_LOG_LEVEL <= CLUSTERD_DEBUG )
+    setenv("CLUSTERD_DEBUG", "1", 1);
+}
+
+static int setup_service_signals(sigset_t *oldmask) {
+  int err;
+
+  err = sigprocmask(SIG_SETMASK, oldmask, NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not reset service mask: %s", strerror(errno));
+    return -1;
+  }
+
+  // SIGTERM, SIGQUIT, SIGINT, etc are handled gracefully
+  // elsewhere. This is mostly a catch-all
+  err = prctl(PR_SET_PDEATHSIG, SIGKILL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set parent death signal: %s", strerror(errno));
     return -1;
   }
 
@@ -958,6 +1033,10 @@ static void close_fds() {
     close(g_service_out);
   if ( g_service_in > 0 )
     close(g_service_in);
+  if ( g_sigdelivery_pipe[0] > 0 )
+    close(g_sigdelivery_pipe[0]);
+  if ( g_sigdelivery_pipe[1] > 0 )
+    close(g_sigdelivery_pipe[1]);
 }
 
 static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, char *const *svargv) {
@@ -985,41 +1064,14 @@ static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, 
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fork() to start service: %s", strerror(errno));
     return -1;
   } else if ( child == 0 ) {
-    char ns_path[PATH_MAX];
-    char idstr[32];
-    unsigned char one = 1;
     close(stspipe[0]);
 
-    strncpy(ns_path, g_ps_path, sizeof(ns_path));
-    dirname(ns_path);
+    setup_service_env();
 
-    // TODO determine if we really need this. We probably need to keep some clusterd_ variables around
-    //clearenv();
-
-    setenv("CLUSTERD_NS_DIR", ns_path, 1);
-    setenv("CLUSTERD_PS_DIR", g_ps_path, 1);
-
-    snprintf(idstr, sizeof(idstr), NS_F, g_nsid);
-    setenv("CLUSTERD_NAMESPACE", idstr, 1);
-    snprintf(idstr, sizeof(idstr), PID_F, g_pid);
-    setenv("CLUSTERD_PID", idstr, 1);
-
-    setenv("CLUSTERD_HOST", g_clusterd_hostname, 1);
-
-    err = sigprocmask(SIG_SETMASK, oldmask, NULL);
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not reset service mask: %s", strerror(errno));
+    err = setup_service_signals(oldmask);
+    if ( err < 0 )
       exit(100);
-    }
 
-    // SIGTERM, SIGQUIT, SIGINT, etc are handled gracefully
-    // elsewhere. This is mostly a catch-all
-    err = prctl(PR_SET_PDEATHSIG, SIGKILL);
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not set parent death signal: %s", strerror(errno));
-      exit(100);
-    }
- 
     err = drop_privileges();
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges: %s", strerror(errno));
@@ -1348,7 +1400,372 @@ static void process_command(int stspipe, fd_set *rfds, fd_set *efds) {
   }
 }
 
-static void process_socket(int *sk, int family, fd_set *rfd, fd_set *efd) {
+static int run_signal_handler(uint32_t sigordinal, const char *sigtype, sigset_t *oldmask) {
+  pid_t child;
+  int err;
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not fork to run signal handler: %s", strerror(errno));
+    return -1;
+  } else if ( child > 0 ) {
+    // Parent. Wait for the child to exit
+    pid_t err;
+    int sts;
+
+    err = waitpid(child, &sts, 0);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child %d: %s", child, strerror(errno));
+      return -1;
+    }
+
+    if ( WIFEXITED(sts) ) {
+      if ( WEXITSTATUS(sts) == 0 ) return 0;
+      else {
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Signal handler returned %d", WEXITSTATUS(sts));
+        return -1;
+      }
+    } else if ( WIFSIGNALED(sts) ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Signal handler exited from signal %d", WTERMSIG(sts));
+      return -1;
+    } else if ( WCOREDUMP(sts) ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Signal handler exited with core dump");
+      return -1;
+    } else {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "SIgnal handler exited for unknown reason");
+      return -1;
+    }
+  } else {
+    // Child. Execute "image/sighandler". First argument is signal type
+    setup_service_env();
+
+    err = setup_service_signals(oldmask);
+    if ( err < 0 )
+      exit(100);
+
+    err = drop_privileges();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not drop privileges to deliver signal: %s", strerror(errno));
+      exit(100);
+    }
+
+    setup_service_logging();
+    close_fds();
+
+    execl("image/sighandler", "sighandler", sigtype, NULL);
+    exit(100);
+  }
+}
+
+static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask) {
+  clusterctl ctl;
+  int err, ret = 0;
+
+  char nsstr[128];
+  char psstr[128];
+  char sigordinalstr[128];
+  char nextsigbuf[4 * 4096];
+
+  struct stat sigexest;
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl: %s", strerror(errno));
+    return -1;
+  }
+
+  err = stat("image/sighandler", &sigexest);
+  if ( err < 0 ) {
+    if ( errno == ENOENT ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Process received signal, but there is no signal handler");
+    } else {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not stat sighandler: %s", strerror(errno));
+    }
+
+    // Mark all signals as delivered
+    err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
+                                 mark_all_signals_lua,
+                                 nextsigbuf, sizeof(nextsigbuf),
+                                 "namespace", nsstr,
+                                 "process", psstr,
+                                 NULL);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not mark all signals read: %s", strerror(errno));
+      ret = -1;
+      goto done;
+    }
+
+    goto done;
+  }
+
+  for (;;) {
+    json_error_t jserr;
+    json_t *sig;
+
+    json_int_t next_sigordinal;
+
+    const char *sigtype;
+
+    err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
+                                 get_next_signal_lua,
+                                 nextsigbuf, sizeof(nextsigbuf),
+                                 "namespace", nsstr,
+                                 "process", psstr,
+                                 "sigordinal", sigordinalstr,
+                                 NULL);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get signals from clusterctl: %s", strerror(errno));
+      ret = -1;
+      goto done;
+    }
+
+    sig = json_loads(nextsigbuf, JSON_DECODE_ANY, &jserr);
+    if ( !sig ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Skip signal processing at %u: json error: %s", *last_delivered,
+                   jserr.text);
+      ret = -1;
+      goto done;
+    }
+
+    // Check if it's a null type
+    if ( json_is_null(sig) ) {
+      json_decref(sig);
+      goto done;
+    }
+
+    // The signal response should contain the signal ordinal of the
+    // current signal, and the last one
+    err = json_unpack_ex(sig, &jserr, 0, "{sIss}",
+                         "sigordinal", &next_sigordinal,
+                         "type", &sigtype);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unpack signal information: %s. In info: %s", jserr.text, nextsigbuf);
+      ret = -1;
+      goto done;
+    }
+
+    // Now deliver this signal by executing the sighandler executable
+    err = run_signal_handler(next_sigordinal, sigtype, oldmask);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Signal handler failed. Ignoring and delivering next signal");
+    }
+
+    *last_delivered = next_sigordinal;
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Delivered signal %llu: %s", next_sigordinal, sigtype);
+
+    json_decref(sig);
+  }
+
+ done:
+  clusterctl_close(&ctl);
+  return ret;
+}
+
+// Signals are delivered by reading from the clusterd controllers in a
+// separate process. We only run one such process at a time.
+//
+// If there is currently no signal delivery process, this will fork
+// one and save the PID.
+//
+// If there is already one, then we wait to see what sigordinal it
+// will return and continue. If the sigordinal it returned (which
+// represents the last signal delivered) is less than g_sigordinal,
+// then we will fork a new process to deliver the signal.
+//
+// Note that signals must match the signal mask
+static void trigger_signal_delivery(sigset_t *oldmask) {
+  pid_t child;
+  int err;
+
+  if ( g_sigdelivery_pid > 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal delivery deferred because signal delivery process is running");
+    return;
+  }
+
+  if ( g_sigordinal <= g_sigordinal_last ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "No new signals to deliver");
+    return;
+  }
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not fork() sigdelivery process: %s", strerror(errno));
+  } else if ( child > 0 ) {
+    g_sigdelivery_pid = child;
+  } else {
+    uint32_t last_delivered = g_sigordinal_last;
+    int ec = 0;
+    ssize_t sz;
+
+    // This is the child process.
+    //
+    // 1. Open clusterd controller.
+    // 2. Get a list of all signals
+    // 3. Run the signal delivery executable in the namespace for each one.
+    // 4. Report status back to main process
+
+    err = deliver_clusterd_signals(&last_delivered, oldmask);
+    if ( err < 0 ) {
+      ec = 1;
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not deliver signals");
+    }
+
+    // Report delivery
+    sz = write(g_sigdelivery_pipe[1], &last_delivered, sizeof(last_delivered));
+    if ( sz < 0 ) {
+      ec = 1;
+      CLUSTERD_LOG(CLUSTERD_CRIT, "COuld not write delivery status to pipe: %s", strerror(errno));
+    }
+
+    exit(ec);
+  }
+}
+
+static void handle_sigdelivery_exit(sigset_t *oldmask) {
+  if ( g_sigdelivery_pid > 0 ) {
+    pid_t err;
+    int sts;
+
+    err = waitpid(g_sigdelivery_pid, &sts, WNOHANG);
+    if ( err < 0 ) {
+      if ( errno == ECHILD )
+        g_sigdelivery_pid = -1;
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not wait for signal delivery process: %s", strerror(errno));
+    } else if ( err == 0 ) {
+      // Process has not exited
+      return;
+    } else {
+      if ( WIFEXITED(sts) && WEXITSTATUS(sts) != 0 )
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Signal delivery process exited with %d", WEXITSTATUS(sts));
+      else if ( WIFSIGNALED(sts) )
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Signal delivery process exits due to signal %d", WTERMSIG(sts));
+      else if ( WCOREDUMP(sts) )
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Signal delivery process exited due to core dump");
+
+      g_sigdelivery_pid = -1;
+    }
+
+    // If there are newer signals than reported, trigger a new signal delivery
+    trigger_signal_delivery(oldmask);
+  }
+}
+
+static int open_sigdelivery_pipe() {
+  int err;
+
+  if ( g_sigdelivery_pipe[0] > 0 )
+    close(g_sigdelivery_pipe[0]);
+  if ( g_sigdelivery_pipe[1] > 0 )
+    close(g_sigdelivery_pipe[1]);
+
+  g_sigdelivery_pipe[0] = -1;
+  g_sigdelivery_pipe[1] = -1;
+
+  /* Create the sigdelivery sockets */
+  err = pipe2(g_sigdelivery_pipe, O_NONBLOCK);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create signal delivery status pipe");
+    return -1;
+  }
+
+  if ( g_sigdelivery_pipe[0] > g_max_socket )
+    g_max_socket = g_sigdelivery_pipe[0];
+
+  return 0;
+}
+
+static void process_sigdelivery_status(int sigdelivery, sigset_t *oldmask, fd_set *rfds, fd_set *efds) {
+  if ( FD_ISSET(sigdelivery, rfds) ) {
+    ssize_t sz;
+    uint32_t last_sigdelivery;
+
+    for (;;) {
+      sz = read(sigdelivery, &last_sigdelivery, sizeof(last_sigdelivery));
+      if ( sz < 0 ) {
+        if ( errno == EWOULDBLOCK || errno == EAGAIN )
+          goto read_done;
+
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read from sigdelivery pipe: %s", strerror(errno));
+        goto read_done;
+      }
+
+      if ( sz != sizeof(last_sigdelivery) ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read entire sig delivery ordinal");
+        goto read_done;
+      }
+
+      if ( last_sigdelivery > g_sigordinal_last )
+        g_sigordinal_last = last_sigdelivery;
+
+      if ( g_sigordinal_last > g_sigordinal )
+        g_sigordinal = g_sigordinal_last;
+    }
+  }
+
+ read_done:
+  if ( FD_ISSET(sigdelivery, efds) ) {
+    int err;
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "sig delivery pipe error. Recreating pipe. This may re-trigger signal delivery");
+    err = open_sigdelivery_pipe();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not recreate sigdelivery pipe");
+    }
+  }
+
+  // We call this just in case the proces has already exited. If there
+  // are signals available, then this will re-trigger delivery.
+  trigger_signal_delivery(oldmask);
+}
+
+static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, size_t sz) {
+  clusterd_request req;
+  clusterd_attr *attr;
+  uint32_t sigordinal = 0;
+
+  if ( sz < sizeof(req) ) return;
+
+  memcpy(&req, reqbuf, sizeof(req));
+
+  if ( ntohl(req.magic) != CLUSTERD_MAGIC )
+    return;
+
+  if ( ntohs(req.op) != CLUSTERD_OP_MONITOR_ACK )
+    return;
+
+  FORALL_CLUSTERD_ATTRS(attr, reqbuf, &req) {
+    uint16_t atype = ntohs(attr->atype);
+    uint16_t alen = ntohs(attr->alen);
+
+    if ( atype == CLUSTERD_ATTR_SIGORDINAL ) {
+      void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);
+
+      if ( alen != sizeof(sigordinal) ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Heartbeat ack sig ordinal too large. Ignoring");
+        continue;
+      }
+
+      if ( adata ) {
+        memcpy(&sigordinal, adata, sizeof(sigordinal));
+        sigordinal = ntohl(sigordinal);
+      }
+    } else if ( CLUSTERD_ATTR_OPTIONAL(atype) ) continue;
+    else {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack with unknown, required attribute %04x. Ignoring", atype);
+      return;
+    }
+  }
+
+  if ( sigordinal != 0 &&
+       sigordinal > g_sigordinal ) {
+    g_sigordinal = sigordinal;
+
+    trigger_signal_delivery(oldmask);
+  }
+}
+
+static void process_socket(int *sk, int family, sigset_t *oldmask,
+                           fd_set *rfd, fd_set *efd) {
   int err;
 
 
@@ -1375,7 +1792,43 @@ static void process_socket(int *sk, int family, fd_set *rfd, fd_set *efd) {
   }
 
   if ( FD_ISSET(*sk, rfd) ) {
-    CLUSTERD_LOG(CLUSTERD_INFO, "Would read monitor socket %d", *sk); // TODO
+    struct sockaddr_storage sockaddr;
+    socklen_t socksz;
+    ssize_t sz;
+    char reqbuf[4096];
+
+    for (;;) {
+      socksz = sizeof(sockaddr);
+      sz = recvfrom(*sk, reqbuf, sizeof(reqbuf), MSG_DONTWAIT,
+                    (struct sockaddr *)&sockaddr, &socksz);
+      if ( sz < 0 ) {
+        if ( errno == EAGAIN || errno == EWOULDBLOCK ) {
+          break;
+        } else if ( errno == EINTR ) {
+          continue;
+        } else {
+          CLUSTERD_LOG(CLUSTERD_CRIT, "Error on socket %d: %s", *sk, strerror(errno));
+          exit(98);
+        }
+      } else {
+        monitor *m;
+
+        // Ensure the packet was from a monitor
+        for ( m = g_monitors; m; m = m->next ) {
+          if ( clusterd_addrcmp(&m->addr, &sockaddr) == 0 ) break;
+        }
+
+        if ( m ) {
+          process_monitor_hb_ack(m, oldmask, reqbuf, sz);
+        } else {
+          char addrstr[CLUSTERD_ADDRSTRLEN];
+
+          clusterd_addr_render(addrstr, (struct sockaddr *)&sockaddr, 1);
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Got unknown UDP packet of size %zd from %s",
+                       sz, addrstr);
+        }
+      }
+    }
   }
 }
 
@@ -1983,6 +2436,12 @@ int main(int argc, char *const *argv) {
 
     return 0;
   } else {
+    err = open_sigdelivery_pipe();
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open sigdelivery pipes");
+      return 1;
+    }
+
     /* Execute the service binary */
     err = exec_service(&ps, &smask, realpath, svargc, svargv);
     if ( err < 0 ) {
@@ -1996,7 +2455,9 @@ int main(int argc, char *const *argv) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not record new state");
     }
 
-    g_max_socket = g_socket4;
+    if ( g_socket4 > g_max_socket )
+      g_max_socket = g_socket4;
+
     if ( g_socket6 > g_max_socket )
       g_max_socket = g_socket6;
 
@@ -2005,7 +2466,7 @@ int main(int argc, char *const *argv) {
 
     while ( g_state != PROCESS_COMPLETE ) {
       pid_t werr;
-      int sts, nfds, evs;
+      int sts, evs;
       monitor *pending_hb;
 
       fd_set rfds, wfds, efds;
@@ -2029,6 +2490,9 @@ int main(int argc, char *const *argv) {
         FD_SET(g_socket6, &rfds);
         FD_SET(g_socket6, &efds);
       }
+
+      FD_SET(g_sigdelivery_pipe[0], &rfds);
+      FD_SET(g_sigdelivery_pipe[0], &efds);
 
       FD_SET(stspipe, &rfds);
       FD_SET(stspipe, &efds);
@@ -2120,6 +2584,8 @@ int main(int argc, char *const *argv) {
 
           g_down_signal = -1;
         }
+
+        handle_sigdelivery_exit(&smask);
       } else {
         struct timespec now;
 
@@ -2145,12 +2611,13 @@ int main(int argc, char *const *argv) {
 
         // Respond to events
         if ( g_socket4 >= 0 )
-          process_socket(&g_socket4, AF_INET, &rfds, &efds);
+          process_socket(&g_socket4, AF_INET, &smask, &rfds, &efds);
 
         if ( g_socket6 >= 0 )
-          process_socket(&g_socket6, AF_INET6, &rfds, &efds);
+          process_socket(&g_socket6, AF_INET6, &smask, &rfds, &efds);
 
         process_command(stspipe, &rfds, &efds);
+        process_sigdelivery_status(g_sigdelivery_pipe[0], &smask, &rfds, &efds);
 
         // If the state is PROCESS_RECOVERED and g_next_start has passed, start the service again
         if ( g_state == PROCESS_RECOVERED &&

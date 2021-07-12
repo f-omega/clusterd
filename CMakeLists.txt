@@ -64,7 +64,7 @@ add_executable(clusterd-service src/programs/clusterd-service.c)
 target_link_libraries(clusterd-service clusterctllib)
 
 add_executable(clusterd-host src/programs/clusterd-host.c src/programs/config.c)
-target_link_libraries(clusterd-host clusterctllib ${LIBUV_LIBRARIES})
+target_link_libraries(clusterd-host clusterctllib ${LIBUV_LIBRARIES} ${JANSSON_LIBRARIES})
 
 add_executable(clusterd-exec src/programs/clusterd-exec.c)
 target_link_libraries(clusterd-exec clusterctllib)

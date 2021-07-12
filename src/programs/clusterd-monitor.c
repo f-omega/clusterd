@@ -44,6 +44,10 @@ static int CLUSTERD_LOG_LEVEL = CLUSTERD_INFO;
 #define PROCESS_STATE_ACTIVE   0x1
 #define PROCESS_STATE_DEGRADED 0x2
 
+#define CLUSTERD_UNKNOWN_ATTR_TEXT                                      \
+  "Unknown attribute %04x is not optional. Ignoring packet. "           \
+  "This may be caused by a version mismatch"
+
 typedef struct {
   clusterd_namespace_t namespace;
   clusterd_pid_t       process;
@@ -60,6 +64,7 @@ typedef struct {
 
   struct sockaddr_storage addr;
 
+  uint32_t sigordinal;
   int mon_count;
   struct sockaddr_storage monitors[MAX_MONITORS];
 } process_record;
@@ -173,7 +178,7 @@ static void process_timeout(uv_timer_t *hdl) {
 }
 
 static int touch_process(process_record *process, const struct sockaddr *addr, unsigned int interval,
-                         struct sockaddr_storage *monitors, int mon_count) {
+                         uint32_t sigordinal, struct sockaddr_storage *monitors, int mon_count) {
   int err;
 
   if ( memcmp(addr, &process->addr, CLUSTERD_ADDR_LENGTH(addr)) != 0 ) {
@@ -198,6 +203,10 @@ static int touch_process(process_record *process, const struct sockaddr *addr, u
   process->error_count = 0;
   process->success_count ++;
 
+  process->sigordinal = 0;
+  if ( sigordinal > process->sigordinal )
+    process->sigordinal = sigordinal;
+
   if ( process->success_count >= g_success_threshold &&
        process->state == PROCESS_STATE_DEGRADED ) {
     CLUSTERD_LOG(CLUSTERD_INFO, "Process %u::%u reactivating",
@@ -216,7 +225,7 @@ static int touch_process(process_record *process, const struct sockaddr *addr, u
 }
 
 static int create_process(process_key *key, const struct sockaddr *addr, unsigned int interval,
-                          struct sockaddr_storage *monitors, int mon_count) {
+                          uint32_t sigordinal, struct sockaddr_storage *monitors, int mon_count) {
   process_record *process;
 
   process = malloc(sizeof(process_record));
@@ -230,6 +239,10 @@ static int create_process(process_key *key, const struct sockaddr *addr, unsigne
   process->error_count = 0;
   process->success_count = 1;
 
+  process->sigordinal = 0;
+  if ( sigordinal  > process->sigordinal )
+    process->sigordinal = sigordinal;
+
   memcpy(&process->addr, addr, CLUSTERD_ADDR_LENGTH(addr));
   process->mon_count = mon_count;
   memcpy(process->monitors, monitors, sizeof(struct sockaddr_storage) * mon_count);
@@ -239,9 +252,160 @@ static int create_process(process_key *key, const struct sockaddr *addr, unsigne
   return 0;
 }
 
-static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
-                               const struct sockaddr *addr, unsigned int flags) {
-  clusterd_request req;
+static void process_signal_notification(uv_udp_t *handle, const struct sockaddr *addr,
+                                        void *buf, clusterd_request *req) {
+  char rspbuf[2048];
+  off_t off = 0, attroff = 0;
+
+  clusterd_attr *attr;
+
+  process_key key;
+  uint32_t sigordinal = 0;
+
+  int has_namespace = 0, has_process = 0;
+
+  uv_buf_t psig_msg;
+
+  int err;
+
+  process_record *process;
+
+  FORALL_CLUSTERD_ATTRS(attr, buf, req) {
+    uint16_t attr_len = ntohs(attr->alen);
+
+    switch ( ntohs(attr->atype) ) {
+    case CLUSTERD_ATTR_NAMESPACE:
+      if ( has_namespace ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification request contains two or more namespaces. Ignoring");
+        return;
+      }
+
+      if ( attr_len != sizeof(clusterd_namespace_t) ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring");
+        return;
+      }
+
+      has_namespace = 1;
+      key.namespace = CLUSTERD_NTOH_NAMESPACE(*(clusterd_namespace_t *)CLUSTERD_ATTR_DATA(attr, buf, req));
+      break;
+
+    case CLUSTERD_ATTR_PROCESS:
+      if ( has_process ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification request constains two or more processes. Ignoring");
+        return;
+      }
+
+      if ( attr_len != sizeof(clusterd_pid_t) ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Process ID attribute has incorrect length. Ignoring");
+        return;
+      }
+
+      has_process = 1;
+      key.process = CLUSTERD_NTOH_PROCESS(*(clusterd_pid_t *)CLUSTERD_ATTR_DATA(attr, buf, req));
+      break;
+
+    case CLUSTERD_ATTR_SIGORDINAL:
+      if ( sigordinal != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification request contains multiple ordinals. Ignoring");
+        return;
+      }
+
+      if ( attr_len != sizeof(sigordinal) ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification request has incorrect length. Ignoring");
+        return;
+      }
+
+      sigordinal = ntohl(*(uint32_t *)CLUSTERD_ATTR_DATA(attr, buf, req));
+      if ( !sigordinal ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Sig ordinal attribute was zero. Ignoring packet");
+        return;
+      }
+      break;
+
+    default:
+      if ( CLUSTERD_ATTR_OPTIONAL(ntohs(attr->atype)) ) continue;
+      else {
+        CLUSTERD_LOG(CLUSTERD_WARNING, CLUSTERD_UNKNOWN_ATTR_TEXT,
+                     ntohs(attr->atype));
+        return;
+      }
+    }
+  }
+
+  if ( !has_namespace ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification is missing namespace");
+    return;
+  }
+
+  if ( !has_process ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification is missing process");
+    return;
+  }
+
+  if ( sigordinal == 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Signal notification is missing signal ordinal");
+    return;
+  }
+
+  CLUSTERD_INIT_REQ(rspbuf, off, sizeof(rspbuf), CLUSTERD_OP_SIG_ACK);
+
+  // Lookup the process record
+  HASH_FIND(hh, g_processes, &key, sizeof(process_key), process);
+  if ( !process ) {
+    clusterd_error_attr rsperr = CLUSTERD_HTON_ERROR(CLUSTERD_ERR_PROC_NOT_FOUND);
+
+    // Return process not found error
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process " PID_F " not found in namespace " NS_F " during signal notification",
+                 key.process, key.namespace);
+
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_ERROR);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, &rsperr, sizeof(rsperr));
+  } else {
+    // This is it. Just update the sigordinal. On the next monitor
+    // request, the sig ordinal will be returned in the response
+
+    clusterd_namespace_t netns = CLUSTERD_HTON_NAMESPACE(key.namespace);
+    clusterd_pid_t netps = CLUSTERD_HTON_PROCESS(key.process);
+    uint32_t netsigord = htonl(sigordinal);
+
+    if ( sigordinal > process->sigordinal )
+      process->sigordinal = sigordinal;
+
+    // Return acknowledgement
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_NAMESPACE);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, &netns, sizeof(netns));
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_PROCESS);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, &netps, sizeof(netps));
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_SIGORDINAL);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, &netsigord, sizeof(netsigord));
+  }
+
+  CLUSTERD_FINISH_REQUEST(rspbuf, off, attroff);
+  psig_msg.base = rspbuf;
+  psig_msg.len = off;
+
+  err = uv_udp_try_send(handle, &psig_msg, 1, addr);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_WARNING, "Could not send signal ack: %s", uv_strerror(err));
+    return;
+  }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Delivered signal process " PID_F " in namespace " NS_F ": new ordinal is %u",
+               key.process, key.namespace, sigordinal);
+
+  return;
+
+ nospace:
+  CLUSTERD_LOG(CLUSTERD_CRIT, "Not enough space to send signal notification for process " PID_F
+               " in namespace " NS_F, key.process, key.namespace);
+  return;
+}
+
+static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *addr,
+                                    void *request, clusterd_request *req) {
+  char rspbuf[2048];
+  off_t off = 0, attroff = 0;
+
   clusterd_attr *attr;
 
   uint16_t attr_type;
@@ -252,6 +416,7 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
   unsigned int interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 
   process_key key;
+  uint32_t sigordinal = 0, last_sigordinal = 0;
 
   clusterd_ip4_attr ip4;
   clusterd_ip6_attr ip6;
@@ -264,37 +429,10 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
 
   memset(monitors, 0, sizeof(monitors));
 
-  if ( nread < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Transmission error on handle");
-    return;
-  }
-
-  if ( nread < sizeof(clusterd_request) ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Received monitor request is too short to be valid");
-    return;
-  }
-
-  if ( ntohs(req.length) >= nread ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Request is supposedly longer than the number of bytes read");
-    return;
-  }
-
-  if ( ntohl(req.magic) != CLUSTERD_MAGIC ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring request because MAGIC does not match");
-    return;
-  }
-
-  if ( ntohs(req.op) != CLUSTERD_OP_MONITOR ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring request because it's not a MONITOR request");
-    return;
-  }
-
-  memcpy(&req, buf->base, sizeof(clusterd_request));
-
-  FORALL_CLUSTERD_ATTRS(attr, buf->base, &req) {
+  FORALL_CLUSTERD_ATTRS(attr, request, req) {
     attr_type = ntohs(attr->atype);
     attr_len = ntohs(attr->alen);
-    attr_value = CLUSTERD_ATTR_DATA(attr, buf->base, &req);
+    attr_value = CLUSTERD_ATTR_DATA(attr, request, req);
 
     switch ( attr_type ) {
     case CLUSTERD_ATTR_NAMESPACE:
@@ -362,12 +500,22 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
       }
       break;
 
+    case CLUSTERD_ATTR_SIGORDINAL:
+      if ( sigordinal != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Sig ordinal given twice in monitor request. Ignoring");
+        return;
+      } else if ( attr_len != sizeof(sigordinal) ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Sig ordinal is too large. Ignoring");
+        return;
+      } else {
+        sigordinal = ntohl(*(uint32_t *)attr_value);
+      }
+      break;
+
     default:
       if ( CLUSTERD_ATTR_OPTIONAL(attr_type) ) continue;
       else {
-        CLUSTERD_LOG(CLUSTERD_WARNING,
-                     "Unknown attribute %04x is not optional. Ignoring packet. "
-                     "This may be caused by a version mismatch",
+        CLUSTERD_LOG(CLUSTERD_WARNING, CLUSTERD_UNKNOWN_ATTR_TEXT,
                      attr_type);
         return;
       }
@@ -387,27 +535,37 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u does not exist. Creating...",
                  (unsigned)key.namespace,
                  (unsigned)key.process);
-    err = create_process(&key, addr, interval, monitors, mon_count);
+    err = create_process(&key, addr, interval, sigordinal, monitors, mon_count);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not create process");
       return;
     }
+
+    last_sigordinal = sigordinal;
   } else {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u already exists. Touching...",
                  (unsigned)key.namespace,
                  (unsigned)key.process);
-    err = touch_process(existing, addr, interval, monitors, mon_count);
+    err = touch_process(existing, addr, interval, sigordinal, monitors, mon_count);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not touch process");
       return;
     }
+
+    last_sigordinal = existing->sigordinal;
   }
 
   // Send ACK request
-  CLUSTERD_FORMAT_REQUEST(&req, CLUSTERD_OP_MONITOR_ACK, 0);
+  CLUSTERD_INIT_REQ(rspbuf, off, sizeof(rspbuf), CLUSTERD_OP_MONITOR_ACK);
+  if ( last_sigordinal != 0 ) {
+    uint32_t netsigord = htonl(last_sigordinal);
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_SIGORDINAL);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, &netsigord, sizeof(netsigord));
+  }
+  CLUSTERD_FINISH_REQUEST(rspbuf, off, attroff);
 
-  ack_buf.base = (void *)&req;
-  ack_buf.len = sizeof(req);
+  ack_buf.base = (void *)rspbuf;
+  ack_buf.len = off;
 
   err = uv_udp_try_send(handle, &ack_buf, 1, addr);
   if ( err < 0 ) {
@@ -421,6 +579,52 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
  too_many_monitors:
   CLUSTERD_LOG(CLUSTERD_WARNING, "Too many monitors in monitor request. Ignoring");
   return;
+
+ nospace:
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not send monitor response: no space");
+  return;
+}
+
+static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf,
+                               const struct sockaddr *addr, unsigned int flags) {
+  clusterd_request req;
+
+
+  if ( nread < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Transmission error on handle");
+    return;
+  }
+
+  if ( nread < sizeof(clusterd_request) ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Received monitor request is too short to be valid");
+    return;
+  }
+
+  memcpy(&req, buf->base, sizeof(clusterd_request));
+
+  if ( ntohs(req.length) >= nread ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Request is supposedly longer than the number of bytes read");
+    return;
+  }
+
+  if ( ntohl(req.magic) != CLUSTERD_MAGIC ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring request because MAGIC does not match");
+    return;
+  }
+
+  switch ( ntohs(req.op) ) {
+  case CLUSTERD_OP_MONITOR:
+    process_monitor_request(handle, addr, buf->base, &req);
+    break;
+
+  case CLUSTERD_OP_SIG_NOTIFY:
+    process_signal_notification(handle, addr, buf->base, &req);
+    break;
+
+  default:
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Ignoring request because it's not a MONITOR or signal notification");
+    return;
+  }
 }
 
 static int bind_address(const char *addrstr, uv_loop_t *loop) {
