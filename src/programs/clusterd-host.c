@@ -673,6 +673,7 @@ static int add_monitor(char *addrstr) {
 
   // TODO allow addrstr to contain ports
 
+  memset(&hint, 0, sizeof(hint));
   hint.ai_family = AF_UNSPEC; // IPv4 or IPv6 is fine
   hint.ai_socktype = SOCK_DGRAM; // Want UDP sockets
   hint.ai_protocol = IPPROTO_UDP;
