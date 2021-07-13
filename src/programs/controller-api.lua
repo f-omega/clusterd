@@ -1012,7 +1012,7 @@ function clusterd.update_process(ns, pid, options)
         { ns = process.ps_ns, ps = process.ps_id }
      )
      if err ~= nil then
-       error('could not clear old monitor list: " .. err)
+       error('could not clear old monitor list: ' .. err)
      end
 
      for _, monitor in ipairs(options.monitors) do
