@@ -79,7 +79,7 @@ static const char *create_process_lua =
   "clusterd.output(pid)\n";
 
 static const char *kill_process_lua =
-  "clusterd.kill_process(params.namespace, tonumber(params.pid))\n";
+  "clusterd.delete_process(params.namespace, tonumber(params.pid))\n";
 
 clusterd_monitor *g_monitors = NULL;
 unsigned long g_monitors_desired = MIN_MONITORS;
@@ -736,9 +736,8 @@ int main(int argc, char *const *argv) {
    * contacted, we print a status message to stdout. Once all monitor
    * nodes have been contacted, we print a status message indicating
    * high-availability. */
-  if ( availability == CLUSTERD_HIGH_AVAILABILITY ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "TODO High-availibility processes not yet available");
-    goto cleanup;
+  if ( availability != CLUSTERD_HIGH_AVAILABILITY ) {
+    g_monitors_desired = 0;
   }
 
   nodeaddr = pinnednodeaddr;

@@ -35,10 +35,13 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <locale.h>
+#include <netdb.h>
 #include <getopt.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #define LOG_CHILD_STATUS(lvl, ec, what)                                  \
@@ -661,20 +664,38 @@ static int reset_monitor_timer(monitor *m) {
 }
 
 static int add_monitor(char *addrstr) {
-  int err;
-  int *sk;
+  int err, *sk;
   struct sockaddr_storage addr;
+  struct addrinfo hint, *addrs;
+  const char *service = CLUSTERD_STRINGIFY(CLUSTERD_DEFAULT_MONITOR_PORT);
   socklen_t addrlen;
   monitor *m;
 
-  // TODO use getaddrinfo
+  // TODO allow addrstr to contain ports
 
-  err = clusterd_addr_parse(addrstr, &addr, 1);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid monitor address: %s", addrstr);
+  hint.ai_family = AF_UNSPEC; // IPv4 or IPv6 is fine
+  hint.ai_socktype = SOCK_DGRAM; // Want UDP sockets
+  hint.ai_protocol = IPPROTO_UDP;
+  hint.ai_flags = AI_ADDRCONFIG | AI_NUMERICSERV;
+
+  err = getaddrinfo(addrstr, service, &hint, &addrs);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not lookup monitor %s: %s", addrstr, gai_strerror(err));
+
     errno = EINVAL;
     return -1;
   }
+
+  if ( !addrs ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not resolve monitor %s: not found", addrstr);
+
+    errno = ENOENT;
+    return -1;
+  }
+
+  memcpy(&addr, &addrs->ai_addr, CLUSTERD_ADDR_LENGTH(&addrs->ai_addr));
+
+  freeaddrinfo(addrs);
 
   switch ( addr.ss_family ) {
   case AF_INET:

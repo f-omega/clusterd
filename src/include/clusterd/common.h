@@ -18,6 +18,8 @@
 
 #define CLUSTERD_PACKED __attribute__(( packed ))
 
+#define CLUSTERD_STRINGIFY(num) #num
+
 #define CLUSTERD_DEFAULT_RUNTIME_PATH "/var/lib/clusterd"
 #define CLUSTERD_DEFAULT_IMAGE_PATH   "/var/lib/clusterd/images"
 #define CLUSTERD_DEFAULT_MONITOR_PORT 20000
