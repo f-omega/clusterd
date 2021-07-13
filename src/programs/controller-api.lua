@@ -1649,7 +1649,7 @@ function clusterd.send_signal(ns, pid, signal)
 
   res, err = api.run(
     [[SELECT COUNT(*) AS pending FROM enqueued_signal
-      WHERE enqsig_ns=$ns AND enqsig_ps=$ps AND NOT enqsig_flagged]]
+      WHERE enqsig_ns=$ns AND enqsig_ps=$ps AND NOT enqsig_flagged]],
     { ns = ps.ps_ns, ps = ps.ps_id }
   )
   if err ~= nil then
