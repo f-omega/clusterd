@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS process_sigmask
 
   , pssig_mask TEXT NOT NULL
 
-  , PRIMARY KEY (pssig_ns, pssig_ps, pssid_id)
+  , PRIMARY KEY (pssig_ns, pssig_ps, pssig_id)
 
   , CONSTRAINT pssig_process_fk
       FOREIGN KEY (pssig_ns, pssig_ps)

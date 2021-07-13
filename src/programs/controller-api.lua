@@ -960,7 +960,7 @@ function clusterd.update_process(ns, pid, options)
       assert(options.sigmaskop == nil or options.sigmaskop == 'update' or
              options.sigmaskop == 'replace', "sigmask operation must be update or replace")
       if options.sigmaskop == nil then
-        options.sigmaskop == 'replace'
+        options.sigmaskop = 'replace'
       end
 
       if options.sigmaskop == 'replace' then
