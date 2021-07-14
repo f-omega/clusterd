@@ -146,7 +146,7 @@ static int randomint(int lo, int hi) {
 
 static const char *sample_nodes(FILE *schedule) {
   static char chosennode[256];
-  char nodeline[1024], nodeid[37], hostname[256];
+  char nodeline[1024], nodeid[37], hostname[256], hostip[128];
   double last_score = NAN;
   int nodes_examined = 0, err;
 
@@ -154,7 +154,7 @@ static const char *sample_nodes(FILE *schedule) {
     int n, r;
     double next_score;
 
-    n = sscanf(nodeline, "%37s %256s %lf", nodeid, hostname, &next_score);
+    n = sscanf(nodeline, "%37s %256s %128s %lf", nodeid, hostname, hostip, &next_score);
     if ( n != 3 ) {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline, ignoring: %s", nodeline);
       continue;
@@ -198,13 +198,13 @@ static const char *sample_nodes(FILE *schedule) {
       double next_score;
 
       // Add any remaining node as monitors
-      err = sscanf(nodeline, "%37s %256s %lf", nodeid, hostname, &next_score);
+      err = sscanf(nodeline, "%37s %256s %128s %lf", nodeid, hostname, hostip, &next_score);
       if ( err != 3 ) {
         CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline while processin monitors, ignoring: %s", nodeline);
         continue;
       }
 
-      monitor = strdup(nodeid);
+      monitor = strdup(hostip);
       if ( !monitor ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Out of memory copying %s", nodeid);
         continue;

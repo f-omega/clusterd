@@ -81,6 +81,7 @@ struct avail_resource {
 struct node_entry {
   char nodeid[37]; // Enough space for a UUID + nul byte
   char hostname[256]; // Enough space for a hostname
+  char ip[CLUSTERD_ADDRSTRLEN];
 
   unsigned int resource_fetch_attempts; // Number of times resource information for this node has been fetched
 
@@ -795,7 +796,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
   json_t *nodeinfo;
   json_error_t jsonerr;
   int err;
-  const char *jsonname, *jsonid;
+  const char *jsonname, *jsonid, *jsonip;
   struct limit_request *limit, *limittmp;
 
   struct node_entry *entry;
@@ -810,7 +811,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
     return -1;
   }
 
-  err = json_unpack(nodeinfo, "{ssss}", "hostname", &jsonname, "id", &jsonid);
+  err = json_unpack(nodeinfo, "{ssssss}", "hostname", &jsonname, "id", &jsonid, "ip", &jsonip);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not access node name or id: %.*s", (int)nodelen, nodebuf);
 
@@ -818,8 +819,9 @@ static int add_node(const char *nodebuf, size_t nodelen) {
   }
 
   if ( strlen(jsonid) >= sizeof(entry->nodeid) ||
-       strlen(jsonname) >= sizeof(entry->hostname) ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Node ID or hostname is too long");
+       strlen(jsonname) >= sizeof(entry->hostname) ||
+       strlen(jsonip) >= sizeof(entry->ip) ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Node ID, IP, or hostname is too long");
     goto error;
   }
 
@@ -831,6 +833,7 @@ static int add_node(const char *nodebuf, size_t nodelen) {
 
   strncpy(entry->nodeid, jsonid, sizeof(entry->nodeid));
   strncpy(entry->hostname, jsonname, sizeof(entry->hostname));
+  strncpy(entry->ip, jsonip, sizeof(entry->ip));
   entry->resource_fetch_attempts = 0;
   entry->resources = NULL;
   entry->next_to_fetch = NULL;
@@ -1139,7 +1142,8 @@ int main(int argc, char *const *argv) {
   }
 
   for ( i = 0; i < g_chosen_node_count; ++i ) {
-    printf("%s\t%s\t%lf\n", g_chosen_nodes[i]->nodeid, g_chosen_nodes[i]->hostname, g_chosen_nodes[i]->score);
+    printf("%s\t%s\t%s\t%lf\n", g_chosen_nodes[i]->nodeid, g_chosen_nodes[i]->hostname,
+           g_chosen_nodes[i]->ip, g_chosen_nodes[i]->score);
   }
 
   return 0;
