@@ -667,7 +667,7 @@ static int add_monitor(char *addrstr) {
   int err, *sk;
   struct sockaddr_storage addr;
   struct addrinfo hint, *addrs;
-  const char *service = #CLUSTERD_DEFAULT_MONITOR_PORT;
+  const char *service = CLUSTERD_STRINGIFY(CLUSTERD_DEFAULT_MONITOR_PORT);
   socklen_t addrlen;
   monitor *m;
 
