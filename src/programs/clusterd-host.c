@@ -681,7 +681,7 @@ static int add_monitor(char *addrstr) {
 
   err = getaddrinfo(addrstr, service, &hint, &addrs);
   if ( err != 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not lookup monitor %s: %s", addrstr, gai_strerror(err));
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not lookup monitor %s (service=%s): %s", addrstr, service, gai_strerror(err));
 
     errno = EINVAL;
     return -1;

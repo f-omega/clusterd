@@ -145,7 +145,7 @@ static int randomint(int lo, int hi) {
 }
 
 static const char *sample_nodes(FILE *schedule) {
-  static char chosennode[256];
+  static char chosennode[256], chosenip[128];
   char nodeline[1024], nodeid[37], hostname[256], hostip[128];
   double last_score = NAN;
   int nodes_examined = 0, err;
@@ -155,7 +155,7 @@ static const char *sample_nodes(FILE *schedule) {
     double next_score;
 
     n = sscanf(nodeline, "%37s %256s %128s %lf", nodeid, hostname, hostip, &next_score);
-    if ( n != 3 ) {
+    if ( n != 4 ) {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline, ignoring: %s", nodeline);
       continue;
     }
@@ -188,6 +188,7 @@ static const char *sample_nodes(FILE *schedule) {
 
       // Replace node
       strncpy(chosennode, hostname, sizeof(chosennode));
+      strncpy(chosenip, hostip, sizeof(chosenip));
     }
   }
 
@@ -199,12 +200,12 @@ static const char *sample_nodes(FILE *schedule) {
 
       // Add any remaining node as monitors
       err = sscanf(nodeline, "%37s %256s %128s %lf", nodeid, hostname, hostip, &next_score);
-      if ( err != 3 ) {
+      if ( err != 4 ) {
         CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not read nodeline while processin monitors, ignoring: %s", nodeline);
         continue;
       }
 
-      monitor = strdup(hostip);
+      monitor = strdup(hostname);
       if ( !monitor ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Out of memory copying %s", nodeid);
         continue;
@@ -463,6 +464,8 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
   for ( m = g_monitors; m; m = m->next ) {
     new_argv[argind++] = "-m";
     new_argv[argind++] = m->monitor_spec;
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Sending monitor %s", m->monitor_spec);
   }
 
   new_argv[argind++] = service;
