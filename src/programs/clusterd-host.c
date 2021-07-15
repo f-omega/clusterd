@@ -694,7 +694,7 @@ static int add_monitor(char *addrstr) {
     return -1;
   }
 
-  memcpy(&addr, &addrs->ai_addr, CLUSTERD_ADDR_LENGTH(&addrs->ai_addr));
+  memcpy(&addr, addrs->ai_addr, CLUSTERD_ADDR_LENGTH(&addrs->ai_addr));
 
   freeaddrinfo(addrs);
 
