@@ -87,7 +87,7 @@ typedef struct {
     req.length = (bufsz);                               \
     req.magic = htonl(CLUSTERD_MAGIC);                  \
                                                         \
-    if ( sizeof(req) < bufsz ) goto nospace;            \
+    if ( sizeof(req) > (bufsz) ) goto nospace;          \
     memcpy((buf), &req, sizeof(req));                   \
     bufoffs = sizeof(req);                              \
   } while ( 0 )
