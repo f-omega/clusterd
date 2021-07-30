@@ -1806,6 +1806,8 @@ static void process_socket(int *sk, int family, sigset_t *oldmask,
     } else if ( soerrlen != sizeof(soerr) ) {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Invalid error result returned");
       return;
+    } else if ( soerr == 0 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Spurious error on socket(?)");
     } else {
       CLUSTERD_LOG(CLUSTERD_ERROR, "Socket error on %d was: %s", *sk, strerror (soerr));
 
