@@ -2595,7 +2595,7 @@ int main(int argc, char *const *argv) {
         timespec_sub(&timeout, &start);
       }
 
-      evs = pselect(g_max_socket, &rfds, &wfds, &efds,
+      evs = pselect(g_max_socket + 1, &rfds, &wfds, &efds,
                     ((timeout.tv_sec != 0 || timeout.tv_nsec != 0) ? &timeout : NULL),
                     &smask);
     process:
