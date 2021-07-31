@@ -429,6 +429,13 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
 
   memset(monitors, 0, sizeof(monitors));
 
+  if ( CLUSTERD_LOG_LEVEL <= CLUSTERD_DEBUG ) {
+    char addrstr[CLUSTERD_ADDRSTRLEN];
+    clusterd_addr_render(addrstr, addr, 1);
+
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Got monitor request from %s", addrstr);
+  }
+
   FORALL_CLUSTERD_ATTRS(attr, request, req) {
     attr_type = ntohs(attr->atype);
     attr_len = ntohs(attr->alen);
