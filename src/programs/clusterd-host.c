@@ -1008,6 +1008,7 @@ static void send_monitor_heartbeat(monitor *m) {
   }
 
   m->state = MONITOR_HEARTBEAT_SENT;
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Sent monitor heartbeat");
   return;
 
  nospace:
