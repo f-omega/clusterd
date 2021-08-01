@@ -308,6 +308,9 @@ static int make_status_pipe() {
     return -1;
   }
 
+  if ( err > g_max_socket )
+    g_max_socket = err;
+
   return err;
 }
 
@@ -635,6 +638,9 @@ static int open_monitor_socket(int family) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open socket: %s", strerror(errno));
     return -1;
   }
+
+  if ( sk > g_max_socket )
+    g_max_socket = sk;
 
   return sk;
 }
@@ -1008,7 +1014,7 @@ static void send_monitor_heartbeat(monitor *m) {
   }
 
   m->state = MONITOR_HEARTBEAT_SENT;
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Sent monitor heartbeat");
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Sent monitor heartbeat on socket %d: %d", m->local_sk, err);
   return;
 
  nospace:
@@ -2479,12 +2485,6 @@ int main(int argc, char *const *argv) {
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not record new state");
     }
-
-    if ( g_socket4 > g_max_socket )
-      g_max_socket = g_socket4;
-
-    if ( g_socket6 > g_max_socket )
-      g_max_socket = g_socket6;
 
     if ( g_max_socket < 0 )
       g_max_socket = 0;
