@@ -1408,7 +1408,7 @@ static void process_command(int stspipe, fd_set *rfds, fd_set *efds) {
   ssize_t err;
 
   if ( FD_ISSET(stspipe, efds) ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Error reading from status pipe");
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Error reading from status pipe %d", stspipe);
     return;
   }
 
@@ -2595,6 +2595,7 @@ int main(int argc, char *const *argv) {
         timespec_sub(&timeout, &start);
       }
 
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got max socket: %d", g_max_socket);
       evs = pselect(g_max_socket + 1, &rfds, &wfds, &efds,
                     ((timeout.tv_sec != 0 || timeout.tv_nsec != 0) ? &timeout : NULL),
                     &smask);
