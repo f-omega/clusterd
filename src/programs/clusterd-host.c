@@ -2589,6 +2589,10 @@ int main(int argc, char *const *argv) {
 
         if ( timespec_cmp(&timeout, &start) <= 0 ) {
           evs = 0;
+
+          FD_ZERO(&rfds);
+          FD_ZERO(&efds);
+          FD_ZERO(&wfds);
           goto process;
         }
 
