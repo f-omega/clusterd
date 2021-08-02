@@ -700,6 +700,12 @@ static int add_monitor(char *addrstr) {
     return -1;
   }
 
+  if ( CLUSTERD_LOG_LEVEL <= CLUSTERD_DEBUG ) {
+    char ipaddrstr[CLUSTERD_ADDRSTRLEN];
+    clusterd_addr_render(ipaddrstr, (struct sockaddr*) addrs->ai_addr, 1);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Resolved monitor %s -> %s", addrstr, ipaddrstr);
+  }
+
   memcpy(&addr, addrs->ai_addr, CLUSTERD_ADDR_LENGTH(&addrs->ai_addr));
 
   freeaddrinfo(addrs);
@@ -728,6 +734,8 @@ static int add_monitor(char *addrstr) {
     errno = ENOMEM;
     return -1;
   }
+
+  m->failures = 0;
 
   memcpy(&m->addr, &addr, sizeof(struct sockaddr_storage));
   m->addrlen = addrlen;
