@@ -739,11 +739,6 @@ int main(int argc, char *const *argv) {
     int err;
     CLUSTERD_LOG(CLUSTERD_WARNING, "No addresses provided. Binding all interfaces");
 
-    err = bind_address("0.0.0.0", &loop);
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_WARNING, "Could not bind any IPv4 addreses");
-    }
-
     err = bind_address("::", &loop);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not bind any IPv6 addresses");
