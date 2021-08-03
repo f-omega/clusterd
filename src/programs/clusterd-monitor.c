@@ -609,7 +609,7 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
 
   memcpy(&req, buf->base, sizeof(clusterd_request));
 
-  if ( ntohs(req.length) >= nread ) {
+  if ( ntohs(req.length) > nread ) {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Request is supposedly longer than the number of bytes read. Got %zd bytes, but request is %d", nread, ntohs(req.length));
     return;
   }
