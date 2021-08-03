@@ -1772,7 +1772,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
 
   FORALL_CLUSTERD_ATTRS(attr, reqbuf, &req) {
     uint16_t atype = ntohs(attr->atype);
-    uint16_t alen = ntohs(attr->alen);
+    uint16_t alen = CLUSTERD_ATTR_DATALEN(attr);
 
     if ( atype == CLUSTERD_ATTR_SIGORDINAL ) {
       void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);

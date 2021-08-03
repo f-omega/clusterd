@@ -1399,7 +1399,7 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
     case CLUSTERD_ATTR_NAMESPACE:
       if ( has_ns ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has duplicate namespace. Ignoring");
-      } else if ( ntohs(attr->alen) != sizeof(tgt.ns) ) {
+      } else if ( CLUSTERD_ATTR_DATALEN(attr) != sizeof(tgt.ns) ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has too short namespace. Ignoring");
       } else {
         void *nsp = CLUSTERD_ATTR_DATA(attr, buf->base, &req);
@@ -1417,7 +1417,7 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
     case CLUSTERD_ATTR_PROCESS:
       if ( has_ps ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has duplicate process. Ignoring");
-      } else if ( ntohs(attr->alen) != sizeof(tgt.ps) ) {
+      } else if ( CLUSTERD_ATTR_DATALEN(attr) != sizeof(tgt.ps) ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Pending signal confirmation has too short process id. Ignoring");
       } else {
         void *psp = CLUSTERD_ATTR_DATA(attr, buf->base, &req);

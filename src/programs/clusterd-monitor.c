@@ -271,7 +271,7 @@ static void process_signal_notification(uv_udp_t *handle, const struct sockaddr 
   process_record *process;
 
   FORALL_CLUSTERD_ATTRS(attr, buf, req) {
-    uint16_t attr_len = ntohs(attr->alen);
+    uint16_t attr_len = CLUSTERD_ATTR_DATALEN(attr);
 
     switch ( ntohs(attr->atype) ) {
     case CLUSTERD_ATTR_NAMESPACE:
@@ -441,7 +441,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
 
   FORALL_CLUSTERD_ATTRS(attr, request, req) {
     attr_type = ntohs(attr->atype);
-    attr_len = ntohs(attr->alen);
+    attr_len = CLUSTERD_ATTR_DATALEN(attr);
     attr_value = CLUSTERD_ATTR_DATA(attr, request, req);
 
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x", attr_type);

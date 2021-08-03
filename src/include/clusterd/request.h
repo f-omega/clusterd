@@ -76,9 +76,11 @@ typedef struct {
         (attr);                                                         \
         (attr) = CLUSTERD_REQUEST_NEXT_ATTR(attr, base, req) )
 
+#define CLUSTERD_ATTR_DATALEN(attr)             \
+  (ntohs((attr)->alen) - sizeof(clusterd_attr))
 #define CLUSTERD_ATTR_DATA(attr, base, req)     \
   CLUSTERD_REQUEST_IF_VALID(base, req, (void *) (((uintptr_t)(attr)) + sizeof(clusterd_attr)), \
-                            ntohs((attr)->alen) - sizeof(clusterd_attr))
+                            CLUSTERD_ATTR_DATALEN(attr))
 
 #define CLUSTERD_INIT_REQ(buf, bufoffs, bufsz, rop)     \
   do {                                                  \
