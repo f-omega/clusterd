@@ -281,12 +281,14 @@ static void process_signal_notification(uv_udp_t *handle, const struct sockaddr 
       }
 
       if ( attr_len != sizeof(clusterd_namespace_t) ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring");
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring (Got %d, expected %d)",
+                     attr_len, sizeof(clusterd_namespace_t));
         return;
       }
 
       has_namespace = 1;
-      key.namespace = CLUSTERD_NTOH_NAMESPACE(*(clusterd_namespace_t *)CLUSTERD_ATTR_DATA(attr, buf, req));
+      memcpy(&key.namespace, CLUSTERD_ATTR_DATA(attr, buf, req), sizeof(clusterd_namespace_t));
+      key.namespace = CLUSTERD_NTOH_NAMESPACE(key.namespace);
       break;
 
     case CLUSTERD_ATTR_PROCESS:
@@ -301,7 +303,8 @@ static void process_signal_notification(uv_udp_t *handle, const struct sockaddr 
       }
 
       has_process = 1;
-      key.process = CLUSTERD_NTOH_PROCESS(*(clusterd_pid_t *)CLUSTERD_ATTR_DATA(attr, buf, req));
+      memcpy(&key.process, CLUSTERD_ATTR_DATA(attr, buf, req), sizeof(clusterd_pid_t));
+      key.process = CLUSTERD_NTOH_PROCESS(key.process);
       break;
 
     case CLUSTERD_ATTR_SIGORDINAL:
