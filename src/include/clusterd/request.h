@@ -5,6 +5,8 @@
 
 #define CLUSTERD_MAGIC 0xC0DEBEA7
 
+#define CLUSTERD_MAX_COOKIE_SIZE 128
+
 // Clusterd requests
 #define CLUSTERD_OP_MONITOR     0x0100
 #define CLUSTERD_OP_MONITOR_ACK 0x0101

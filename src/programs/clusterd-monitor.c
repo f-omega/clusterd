@@ -415,6 +415,9 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
   size_t attr_len;
   void *attr_value;
 
+  char cookie[CLUSTERD_MAX_COOKIE_SIZE];
+  size_t cookielen = 0;
+
   int has_namespace = 0, has_process = 0, mon_count = 0, err;
   unsigned int interval = CLUSTERD_DEFAULT_PING_INTERVAL;
 
@@ -513,6 +516,16 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
       }
       break;
 
+    case CLUSTERD_ATTR_COOKIE:
+      if ( cookielen != 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Monitor request request contains multiple cookies. Ignoring");
+        return;
+      } else {
+        cookielen = CLUSTERD_ATTR_DATALEN(attr);
+        memcpy(cookie, attr_value, cookielen);
+      }
+      break;
+
     case CLUSTERD_ATTR_SIGORDINAL:
       if ( sigordinal != 0 ) {
         CLUSTERD_LOG(CLUSTERD_DEBUG, "Sig ordinal given twice in monitor request. Ignoring");
@@ -574,6 +587,10 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
     uint32_t netsigord = htonl(last_sigordinal);
     CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_SIGORDINAL);
     CLUSTERD_WRITE_ATTR(rspbuf, off, &netsigord, sizeof(netsigord));
+  }
+  if ( cookielen != 0 ) {
+    CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_COOKIE);
+    CLUSTERD_WRITE_ATTR(rspbuf, off, cookie, cookielen);
   }
   CLUSTERD_FINISH_REQUEST(rspbuf, off, attroff);
 
