@@ -453,7 +453,8 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
         return;
       }
       if ( attr_len != sizeof(clusterd_namespace_t) ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring");
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring (Got %d, expected %d)",
+                     attr_len, sizeof(clusterd_namespace_t));
         return;
       }
 
