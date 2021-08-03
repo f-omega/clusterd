@@ -96,7 +96,7 @@ typedef struct {
   do {                                                                  \
     clusterd_attr old_attr;                                             \
     size_t attrsz = (bufoffs) - (attroffs);                             \
-    void *pos = (void *)((uintptr_t)(buf) + (bufoffs));                 \
+    void *pos = (void *)((uintptr_t)(buf) + (attroffs));                 \
     memcpy(&old_attr, pos, sizeof(old_attr));                           \
     old_attr.alen = htons(attrsz);                                      \
     memcpy(pos, &old_attr, sizeof(old_attr));                           \
