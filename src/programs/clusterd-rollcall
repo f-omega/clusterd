@@ -72,15 +72,16 @@ done
 set -o pipefail
 
 if [ -z ${NODE_ADDRESS+x} ]; then
+    set +e
     for a in $(getent ahosts example.com | awk '{print $1}'); do
-        set +e
+
         ADDR=$(ip route get $a | awk '{print $7}')
-        set -e
         if [ $? -eq 0 ]; then
             NODE_ADDRESS="$ADDR"
         fi
     done
 
+    set -e
     if [ -z ${NODE_ADDRESS+x} ]; then
         echo "Could not determine local IP" >&2
         exit 1
