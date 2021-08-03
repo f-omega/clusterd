@@ -8,6 +8,7 @@
 # boot. Custom scripts should be placed in $CLUSTERD_CONFIG_DIR/rollcall.d
 
 set -e
+set -o pipefail
 
 CLUSTERD_CONFIG_DIR=${CLUSTERD_CONFIG_DIR:-/etc/clusterd/}
 CLUSTERD_BIN=${CLUSTERD_BIN:-}
