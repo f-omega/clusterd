@@ -67,7 +67,7 @@ typedef struct {
   ((((uintptr_t)(p)) + (sz)) >= (((uintptr_t) (base)) + ntohl((req)->length)) ? \
    NULL : (p))
 #define CLUSTERD_REQUEST_FIRST_ATTR(base, req)   \
-  CLUSTERD_REQUEST_IF_VALID(base, req, (clusterd_attr *)(((uintptr_t)(req)) + sizeof(clusterd_request)), sizeof(clusterd_attr))
+  CLUSTERD_REQUEST_IF_VALID(base, req, (clusterd_attr *)(((uintptr_t)(base)) + sizeof(clusterd_request)), sizeof(clusterd_attr))
 #define CLUSTERD_REQUEST_NEXT_ATTR(attr, base, req)     \
   CLUSTERD_REQUEST_IF_VALID(base, req, (clusterd_attr *)(((uintptr_t)(attr)) + PAD4(ntohs((attr)->alen))), sizeof(clusterd_attr))
 
