@@ -603,14 +603,14 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
   }
 
   if ( nread < sizeof(clusterd_request) ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Received monitor request is too short to be valid");
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Received monitor request is too short to be valid. Got %zd byte(s), require %zu", nread, sizeof(clusterd_request));
     return;
   }
 
   memcpy(&req, buf->base, sizeof(clusterd_request));
 
   if ( ntohs(req.length) >= nread ) {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Request is supposedly longer than the number of bytes read");
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Request is supposedly longer than the number of bytes read. Got %zd bytes, but request is %d", nread, ntohs(req.length));
     return;
   }
 
