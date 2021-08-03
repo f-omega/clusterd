@@ -441,6 +441,8 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
     attr_len = ntohs(attr->alen);
     attr_value = CLUSTERD_ATTR_DATA(attr, request, req);
 
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x", attr_type);
+
     switch ( attr_type ) {
     case CLUSTERD_ATTR_NAMESPACE:
       if ( has_namespace ) {
