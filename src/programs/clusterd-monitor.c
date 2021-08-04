@@ -224,7 +224,8 @@ static int touch_process(process_record *process, const struct sockaddr *addr, u
   return 0;
 }
 
-static int create_process(process_key *key, const struct sockaddr *addr, unsigned int interval,
+static int create_process(process_key *key, uv_loop_t *loop,
+                          const struct sockaddr *addr, unsigned int interval,
                           uint32_t sigordinal, struct sockaddr_storage *monitors, int mon_count) {
   process_record *process;
 
@@ -246,6 +247,9 @@ static int create_process(process_key *key, const struct sockaddr *addr, unsigne
   memcpy(&process->addr, addr, CLUSTERD_ADDR_LENGTH(addr));
   process->mon_count = mon_count;
   memcpy(process->monitors, monitors, sizeof(struct sockaddr_storage) * mon_count);
+
+  uv_timer_init(loop, &process->next_expected);
+  uv_timer_init(loop, &process->failure_timer);
 
   HASH_ADD_KEYPTR(hh, g_processes, &process->key, sizeof(process_key), process);
 
@@ -560,7 +564,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u does not exist. Creating...",
                  (unsigned)key.namespace,
                  (unsigned)key.process);
-    err = create_process(&key, addr, interval, sigordinal, monitors, mon_count);
+    err = create_process(&key, handle->loop, addr, interval, sigordinal, monitors, mon_count);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not create process");
       return;
