@@ -447,7 +447,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
     attr_len = CLUSTERD_ATTR_DATALEN(attr);
     attr_value = CLUSTERD_ATTR_DATA(attr, request, req);
 
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x", attr_type);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x @ offset %zu", attr_type, (uintptr_t)attr - (uintptr_t)request);
 
     switch ( attr_type ) {
     case CLUSTERD_ATTR_NAMESPACE:
@@ -456,8 +456,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
         return;
       }
       if ( attr_len != sizeof(clusterd_namespace_t) ) {
-        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring (Got %d, expected %d)",
-                     attr_len, sizeof(clusterd_namespace_t));
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Namespace attribute has incorrect length. Ignoring");
         return;
       }
 
