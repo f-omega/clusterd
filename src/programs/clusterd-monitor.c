@@ -447,7 +447,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
     attr_len = CLUSTERD_ATTR_DATALEN(attr);
     attr_value = CLUSTERD_ATTR_DATA(attr, request, req);
 
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x @ offset %zu (attr @ %08lx, req %08lx, req size %d)", attr_type, (uintptr_t)attr - (uintptr_t)request, attr, (uintptr_t) (request), ntohl((req)->length));
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse attribute %04x @ offset %zu (attr @ %08lx, req %08lx, req size %d)", attr_type, (uintptr_t)attr - (uintptr_t)request, attr, (uintptr_t) (request), ntohs((req)->length));
 
     switch ( attr_type ) {
     case CLUSTERD_ATTR_NAMESPACE:
