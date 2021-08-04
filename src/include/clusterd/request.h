@@ -66,7 +66,7 @@ typedef struct {
 
 #define PAD4(x) ((((x) + 3)/4) * 4)
 #define CLUSTERD_REQUEST_IF_VALID(base, req, p, sz)                     \
-  ((((uintptr_t)(p)) + (sz)) >= (((uintptr_t) (base)) + ntohl((req)->length)) ? \
+  (((((uintptr_t)(p)) + (sz)) >= (((uintptr_t) (base)) + ntohl((req)->length))) ? \
    NULL : (p))
 #define CLUSTERD_REQUEST_FIRST_ATTR(base, req)   \
   CLUSTERD_REQUEST_IF_VALID(base, req, (clusterd_attr *)(((uintptr_t)(base)) + sizeof(clusterd_request)), sizeof(clusterd_attr))
