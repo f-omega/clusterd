@@ -1021,6 +1021,7 @@ static void send_monitor_heartbeat(monitor *m) {
     monitor_failure(m);
   }
 
+  reset_monitor_timer(m);
   m->state = MONITOR_HEARTBEAT_SENT;
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Sent monitor heartbeat on socket %d: %d", m->local_sk, err);
   return;
