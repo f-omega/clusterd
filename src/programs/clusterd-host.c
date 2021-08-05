@@ -1759,6 +1759,7 @@ static void process_sigdelivery_status(int sigdelivery, sigset_t *oldmask, fd_se
 static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, size_t sz) {
   clusterd_request req;
   clusterd_attr *attr;
+  int cookie_verified = 0;
   uint32_t sigordinal = 0;
 
   if ( sz < sizeof(req) ) return;
@@ -1787,6 +1788,14 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
         memcpy(&sigordinal, adata, sizeof(sigordinal));
         sigordinal = ntohl(sigordinal);
       }
+    } else if ( atype == CLUSTERD_ATTR_COOKIE ) {
+      void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);
+
+      // Correlate cookie
+      if ( alen != MONITOR_COOKIE_LENGTH ) continue;
+
+      if ( memcmp(adata, m->random_cookie, MONITOR_COOKIE_LENGTH) == 0 )
+        cookie_verified = 1;
     } else if ( CLUSTERD_ATTR_OPTIONAL(atype) ) continue;
     else {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack with unknown, required attribute %04x. Ignoring", atype);
@@ -1800,6 +1809,12 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
 
     trigger_signal_delivery(oldmask);
   }
+
+  if ( cookie_verified ) {
+    m->failures = 0;
+    m->state = MONITOR_WAITING;
+  } else
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Heartbeat ack was stale");
 }
 
 static void process_socket(int *sk, int family, sigset_t *oldmask,
