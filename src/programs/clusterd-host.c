@@ -1782,6 +1782,8 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
     uint16_t atype = ntohs(attr->atype);
     uint16_t alen = CLUSTERD_ATTR_DATALEN(attr);
 
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Got attribute %04x", atype);
+
     if ( atype == CLUSTERD_ATTR_SIGORDINAL ) {
       void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);
 
