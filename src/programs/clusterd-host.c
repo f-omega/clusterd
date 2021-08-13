@@ -647,7 +647,8 @@ static int open_monitor_socket(int family) {
 
 static int reset_monitor_timer(monitor *m) {
   int err, i = 0;
-  uint64_t interval, r = 0;
+  uint64_t interval;
+  int64_t r = 0;
 
   err = clock_gettime(CLOCK_MONOTONIC, &m->next_hb);
   if ( err < 0 ) {
@@ -658,12 +659,13 @@ static int reset_monitor_timer(monitor *m) {
   interval = g_ping_interval - CLUSTERD_DEFAULT_PING_GRACE_PERIOD / 2;
 
   for ( i = 0; i < 100; ++i ) {
-    r += random() % (CLUSTERD_DEFAULT_PING_GRACE_PERIOD * 2);
+    r += random() % (CLUSTERD_DEFAULT_PING_GRACE_PERIOD * 2) - CLUSTERD_DEFAULT_PING_GRACE_PERIOD;
   }
 
   r /= 100;
   interval += r;
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Next monitor interval in %" PRIi64, interval);
   timespec_add_ms(&m->next_hb, interval);
 
   return 0;
@@ -2628,6 +2630,7 @@ int main(int argc, char *const *argv) {
                     ((timeout.tv_sec != 0 || timeout.tv_nsec != 0) ? &timeout : NULL),
                     &smask);
     process:
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got events %d", evs);
       if ( evs < 0 ) {
         if ( errno != EINTR )
           CLUSTERD_LOG(CLUSTERD_CRIT, "Could not select: %s", strerror(errno));
@@ -2649,6 +2652,8 @@ int main(int argc, char *const *argv) {
           return 99;
         }
 
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: send out heartbeats");
+
         // Send out any pending heartbeats, if possible
         for ( pending_hb = g_monitors; pending_hb; pending_hb = pending_hb->next ) {
           if ( pending_hb->state == MONITOR_HEARTBEAT_SEND_PENDING ||
@@ -2663,14 +2668,22 @@ int main(int argc, char *const *argv) {
           }
         }
 
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: process sockets");
         // Respond to events
-        if ( g_socket4 >= 0 )
+        if ( g_socket4 >= 0 ) {
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: process IPv4 socket");
           process_socket(&g_socket4, AF_INET, &smask, &rfds, &efds);
+        }
 
-        if ( g_socket6 >= 0 )
+        if ( g_socket6 >= 0 ) {
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: process IPv6 socket");
           process_socket(&g_socket6, AF_INET6, &smask, &rfds, &efds);
+        }
 
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: process commands");
         process_command(stspipe, &rfds, &efds);
+
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: process signals");
         process_sigdelivery_status(g_sigdelivery_pipe[0], &smask, &rfds, &efds);
 
         // If the state is PROCESS_RECOVERED and g_next_start has passed, start the service again
@@ -2696,6 +2709,7 @@ int main(int argc, char *const *argv) {
 
         if ( g_state != g_recorded_state ) {
           // Attempt to bring the recorded state in line with the current state
+          CLUSTERD_LOG(CLUSTERD_DEBUG, "Loop: reconcile statuses");
           err = record_and_reconcile_states();
           if ( err < 0 ) {
             CLUSTERD_LOG(CLUSTERD_WARNING, "Could not record new state");
