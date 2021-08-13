@@ -1768,7 +1768,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
 
   memcpy(&req, reqbuf, sizeof(req));
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack... processing");
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack of size %u... processing", ntohs(req.length));
 
   if ( ntohl(req.magic) != CLUSTERD_MAGIC )
     return;
@@ -1803,7 +1803,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
       if ( alen != MONITOR_COOKIE_LENGTH ) continue;
 
       if ( !adata ) {
-        CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie received: attr length was %u", alen);
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie received: attr length was %u, at offset %u", alen, ((uintptr_t)attr) - ((uintptr_t)reqbuf));
         continue;
       }
 
