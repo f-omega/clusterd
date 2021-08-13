@@ -1768,11 +1768,15 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
 
   memcpy(&req, reqbuf, sizeof(req));
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack... processing");
+
   if ( ntohl(req.magic) != CLUSTERD_MAGIC )
     return;
 
   if ( ntohs(req.op) != CLUSTERD_OP_MONITOR_ACK )
     return;
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Validated heartbeat ack");
 
   FORALL_CLUSTERD_ATTRS(attr, reqbuf, &req) {
     uint16_t atype = ntohs(attr->atype);
@@ -1805,10 +1809,13 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
     }
   }
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Processed all hb ack attributes");
+
   if ( sigordinal != 0 &&
        sigordinal > g_sigordinal ) {
     g_sigordinal = sigordinal;
 
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Must deliver new signals");
     trigger_signal_delivery(oldmask);
   }
 
