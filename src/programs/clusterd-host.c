@@ -1802,6 +1802,11 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
       // Correlate cookie
       if ( alen != MONITOR_COOKIE_LENGTH ) continue;
 
+      if ( !adata ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie received: attr length was %u", alen);
+        continue;
+      }
+
       if ( memcmp(adata, m->random_cookie, MONITOR_COOKIE_LENGTH) == 0 )
         cookie_verified = 1;
     } else if ( CLUSTERD_ATTR_OPTIONAL(atype) ) continue;
