@@ -1800,15 +1800,22 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
       void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);
 
       // Correlate cookie
-      if ( alen != MONITOR_COOKIE_LENGTH ) continue;
+      if ( alen != MONITOR_COOKIE_LENGTH ) {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Cookie lengths did not match");
+        continue;
+      }
 
       if ( !adata ) {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie received: attr length was %u, at offset %u", alen, ((uintptr_t)attr) - ((uintptr_t)reqbuf));
         continue;
       }
 
-      if ( memcmp(adata, m->random_cookie, MONITOR_COOKIE_LENGTH) == 0 )
+      if ( memcmp(adata, m->random_cookie, MONITOR_COOKIE_LENGTH) == 0 ) {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Validated cookie");
         cookie_verified = 1;
+      } else {
+        CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie found");
+      }
     } else if ( CLUSTERD_ATTR_OPTIONAL(atype) ) continue;
     else {
       CLUSTERD_LOG(CLUSTERD_DEBUG, "Got heartbeat ack with unknown, required attribute %04x. Ignoring", atype);
