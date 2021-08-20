@@ -628,6 +628,8 @@ static void on_monitor_request(uv_udp_t *handle, ssize_t nread, const uv_buf_t *
     return;
   }
 
+  if ( !addr && nread == 0 ) return; // No more datagrams left in queue. No need to report errors
+
   if ( nread < sizeof(clusterd_request) ) {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Received monitor request is too short to be valid. Got %zd byte(s), require %zu", nread, sizeof(clusterd_request));
     return;

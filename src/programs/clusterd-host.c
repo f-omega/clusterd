@@ -1835,6 +1835,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
 
   if ( cookie_verified ) {
     m->failures = 0;
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Monitor state before hb ack was %d (monitor %p)", m->state, m);
     m->state = MONITOR_WAITING;
   } else
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Heartbeat ack was stale");
@@ -2681,6 +2682,7 @@ int main(int argc, char *const *argv) {
                timespec_cmp(&now, &pending_hb->next_hb) >= 0 /* check if time has passed */ ) {
             if ( pending_hb->state == MONITOR_HEARTBEAT_SENT ) {
               // Failure
+              CLUSTERD_LOG(CLUSTERD_DEBUG, "Monitor %p fails because no heartbeat ack received", pending_hb);
               monitor_failure(pending_hb);
               pending_hb->state = MONITOR_WAITING;
             }
