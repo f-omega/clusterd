@@ -526,6 +526,9 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
       } else {
         cookielen = CLUSTERD_ATTR_DATALEN(attr);
         memcpy(cookie, attr_value, cookielen);
+
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Cookie is");
+        CLUSTERD_LOG_HEXDUMP(CLUSTERD_DEBUG, cookie, cookielen);
       }
       break;
 
