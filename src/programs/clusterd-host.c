@@ -679,8 +679,6 @@ static int add_monitor(char *addrstr) {
   socklen_t addrlen;
   monitor *m;
 
-  // TODO allow addrstr to contain ports
-
   memset(&hint, 0, sizeof(hint));
   hint.ai_family = AF_UNSPEC; // IPv4 or IPv6 is fine
   hint.ai_socktype = SOCK_DGRAM; // Want UDP sockets
@@ -728,6 +726,14 @@ static int add_monitor(char *addrstr) {
 
     errno = EINVAL;
     return -1;
+  }
+
+  // Make sure we do not allow duplicates
+  for ( m = g_monitors; m; m = m->next ) {
+    if ( clusterd_addrcmp(&m->addr, &addr) == 0 ) {
+      CLUSTERD_LOG(CLUSTERD_WARNING, "Monitor address %s is a duplicate", addrstr);
+      return 0;
+    }
   }
 
   m = malloc(sizeof(monitor));
@@ -952,7 +958,7 @@ static void send_monitor_heartbeat(monitor *m) {
 
   if ( m->state == MONITOR_WAITING ) {
     /* Choose new cookie */
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Choose new random cookie");
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Choose new random cookie for monitor %p", m->random_cookie);
     random_cookie(m->random_cookie, MONITOR_COOKIE_LENGTH);
 
     CLUSTERD_LOG_HEXDUMP(CLUSTERD_DEBUG, m->random_cookie, MONITOR_COOKIE_LENGTH);
