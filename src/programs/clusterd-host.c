@@ -952,6 +952,7 @@ static void send_monitor_heartbeat(monitor *m) {
 
   if ( m->state == MONITOR_WAITING ) {
     /* Choose new cookie */
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Choose new random cookie");
     random_cookie(m->random_cookie, MONITOR_COOKIE_LENGTH);
   }
 
@@ -1815,6 +1816,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
         cookie_verified = 1;
       } else {
         CLUSTERD_LOG(CLUSTERD_WARNING, "Invalid cookie found");
+        CLUSTERD_LOG_HEXDUMP(CLUSTERD_WARNING, m->random_cookie, MONITOR_COOKIE_LENGTH);
       }
     } else if ( CLUSTERD_ATTR_OPTIONAL(atype) ) continue;
     else {
