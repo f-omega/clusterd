@@ -954,6 +954,8 @@ static void send_monitor_heartbeat(monitor *m) {
     /* Choose new cookie */
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Choose new random cookie");
     random_cookie(m->random_cookie, MONITOR_COOKIE_LENGTH);
+
+    CLUSTERD_LOG_HEXDUMP(CLUSTERD_DEBUG, m->random_cookie, MONITOR_COOKIE_LENGTH);
   }
 
   CLUSTERD_INIT_REQ(buf, bufoffs, sizeof(buf), CLUSTERD_OP_MONITOR);
