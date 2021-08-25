@@ -2173,7 +2173,7 @@ int main(int argc, char *const *argv) {
   svargc = argc - firstarg - 1;
   svargv = argv + firstarg + 1;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p)", path, argv[firstarg]);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p) in namespace %s", path, argv[firstarg], namespace);
 
   /* Read the system configuration */
   err = clusterd_read_system_config(read_gid_and_uid_ranges);
