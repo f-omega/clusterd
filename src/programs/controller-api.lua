@@ -541,200 +541,12 @@ function clusterd.list_namespaces()
 end
 
 ------------------------------------------
--- Services                             --
-------------------------------------------
-
-function clusterd.get_service_by_label(ns_id, svc)
-   assert(type(ns_id) == "number", "namespace id must be a number")
-   assert(type(svc) == "string", "service label must be a string")
-
-   res, err = api.run(
-      [[SELECT s_id FROM service WHERE s_namespace=$ns AND s_label=$label]],
-      { ns = ns_id, label = svc }
-   )
-   if err ~= nil then
-      error("could not get service by label: " .. err)
-   end
-
-   if #res == 0 then
-      return nil
-   end
-
-   if #res > 1 then
-      error("more than one service with label " .. svc .. " in namespace " .. ns_id)
-   end
-
-   return res[1].s_id
-end
-
-function clusterd.resolve_service(ns_id, svc)
-   s_id = tonumber(svc)
-   if s_id == nil then
-      s_id = clusterd.get_service_by_label(ns_id, svc)
-   end
-   return s_id
-end
-
-function clusterd.get_service(ns, svc)
-   ns_id = clusterd.resolve_namespace(ns)
-   if ns_id == nil then
-      error("namespace " .. ns .. " not found")
-   end
-
-   s_id = clusterd.resolve_service(ns_id, svc)
-   if s_id == nil then
-      error("service " .. svc .. " in namespace " .. ns_id .. " not found")
-   end
-
-   res, err = api.run(
-      [[SELECT s_id, s_label, s_path FROM service
-        WHERE s_id=$id]],
-      { id = s_id }
-   )
-   if err ~= nil then
-      error("could not get service " .. svc .. " in namespace " .. ns_id ..
-               ": " .. err)
-   end
-
-   if #res < 1 then
-      error("service " .. svc .. " in namespace " .. ns_id .. " not found")
-   end
-
-   return res[1]
-end
-
-function clusterd.update_service(ns, options)
-   if options == nil then
-      options = {}
-   end
-   assert(type(options) == "table", "service options must be a table")
-
-   assert(options.label == nil or type(options.label) == "string",
-          "service label must be a string, if given")
-   assert(options.id == nil or type(options.id) == "number" or
-             type(options.id) == "string",
-          "service id must be a number or string, if given")
-
-   ns_id = clusterd.resolve_namespace(ns)
-   if ns_id == nil then
-      error("namespace " .. ns .. " not found")
-   end
-
-   if options.id ~= nil then
-      svc = clusterd.resolve_service(ns_id, options.id)
-   end
-
-   if svc ~= nil then
-      -- This is a service update
-      if options.create_only then
-         error("service " .. options.id .. " already exists")
-      end
-
-      res, err =
-         api.run(
-            [[ SELECT s_id FROM service WHERE s_id=$id LIMIT 1 ]],
-            { id = s_id }
-         )
-      if err ~= nil then
-         error("could not lookup service " .. options.id .. " in namespace " .. ns ..
-                  ": " .. err)
-      end
-
-      if #res == 0 then
-         error("service " .. options.id .. " in namespace " .. ns .. ": not found")
-      end
-      action = "update"
-      query =
-         [[UPDATE service
-           SET    s_label = COALESCE($label, s_label),
-                  s_path  = COALESCE($path, s_path)
-           WHERE  s_id    = $id]]
-   else
-      -- This is a service creation
-      assert(type(options.path) == "string",
-             "service path required on creation")
-
-      if options.update_only then
-         if options.id ~= nil then
-            error("service " .. options.id .. " not found")
-         else
-            error("service id must be provided for update")
-         end
-      end
-
-      res, err = api.run([[ SELECT MAX(s_id) AS s_id FROM service ]])
-      if err ~= nil then
-         error("could not generate service id: " .. err)
-      end
-      if #res == 0 then
-         s_id = 1
-      else
-         s_id = (res[1].s_id or 0) + 1
-      end
-
-      action = "create"
-      query =
-         [[INSERT INTO service(s_id, s_namespace, s_label, s_path)
-           VALUES ($id, $ns, $label, $path)]]
-   end
-
-   _, err = api.run(query, { id = s_id,
-                             ns = ns_id,
-                             label = options.label,
-                             path = options.path })
-   if err ~= nil then
-      error("Could not " .. action .. " service " .. (options.id or '') ..
-               ": " .. err)
-   end
-
-   return s_id
-end
-
-function clusterd.list_services(ns)
-   ns_id = clusterd.resolve_namespace(ns)
-   if ns_id == nil then
-      error("namespace " .. ns .. " not found")
-   end
-
-   res, err = api.run(
-      [[SELECT s_id, s_label, s_path FROM service WHERE s_namespace=$ns]],
-      { ns = ns_id }
-   )
-   if err ~= nil then
-      error("Could not get services: " .. err)
-   end
-
-   return res
-end
-
-function clusterd.delete_service(ns, svc)
-   ns_id = clusterd.resolve_namespace(ns)
-   if ns_id == nil then
-      error("namespace " .. ns .. " not found")
-   end
-
-   s_id = clusterd.resolve_service(ns_id, svc)
-   if s_id == nil then
-      error("service " .. svc .. " not found in namespace " .. ns)
-   end
-   _, err = api.run(
-      [[DELETE FROM service WHERE s_namespace=$ns AND s_id=$id]],
-      { ns = ns_id, id = s_id }
-   )
-   if err ~= nil then
-      error("could not delete service " .. svc .. " in namespace " .. ns ..
-               ": " .. err)
-   end
-   output(svc)
-end
-
-------------------------------------------
 -- Processes                            --
 ------------------------------------------
 
-function clusterd.new_process(ns, svc, options)
+function clusterd.new_process(ns, imgpath, options)
    assert(ns ~= nil, "namespace required to create a process")
-   assert(svc ~= nil, "service required to create a process")
+   assert(imgpath ~= nil, "image path required to create a process")
 
    if options == nil then
       options = {}
@@ -743,11 +555,6 @@ function clusterd.new_process(ns, svc, options)
    ns_id = clusterd.resolve_namespace(ns)
    if ns_id == nil then
       error('namespace ' .. ns .. ' does not exist')
-   end
-
-   s_id = clusterd.resolve_service(ns_id, svc)
-   if s_id == nil then
-      error('service ' .. svc .. ' does not exist')
    end
 
    state = 'scheduling'
@@ -772,9 +579,9 @@ function clusterd.new_process(ns, svc, options)
 
    new_pid = res[1].ps_id + 1
    _, err = api.run(
-      [[INSERT INTO process(ps_id, ps_svc, ps_ns, ps_state, ps_placement)
-        VALUES ($id, $svc, $ns, $state, $placement)]],
-      { id = new_pid, svc = s_id, ns = ns_id,
+      [[INSERT INTO process(ps_id, ps_image, ps_ns, ps_state, ps_placement)
+        VALUES ($id, $img, $ns, $state, $placement)]],
+      { id = new_pid, img = imgpath, ns = ns_id,
         state = state, placement = options.placement }
    )
    if err ~= nil then
@@ -801,17 +608,16 @@ function clusterd.list_processes(ns, options)
 
    if options.resolve_names then
       res, err = api.run(
-         [[SELECT ps_id, ps_svc, ps_ns, ps_state, ps_placement,
-                  s.s_label as ps_svc_name, ns.ns_label as ps_ns_name
+         [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement,
+                  ns.ns_label as ps_ns_name
            FROM process
-           JOIN service s ON s.s_id = process.ps_svc
            JOIN namespace ns ON ns.ns_id = process.ps_ns
            WHERE process.ps_ns = $ns]],
          {ns = ns}
       )
    else
       res, err = api.run(
-         [[SELECT ps_id, ps_svc, ps_ns, ps_state, ps_placement
+         [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement
            FROM process
            WHERE process.ps_ns = $ns]],
          {ns = ns}
@@ -861,7 +667,7 @@ function clusterd.get_process(ns, pid)
    end
 
    res, err = api.run(
-      [[SELECT ps_id, ps_svc, ps_ns, ps_state, ps_placement
+      [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement
         FROM process WHERE ps_id=$pid AND ps_ns=$ns]],
       { pid = psid, ns = nsid }
    )

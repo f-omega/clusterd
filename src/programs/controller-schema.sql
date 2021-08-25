@@ -10,25 +10,6 @@ INSERT INTO namespace(ns_id, ns_label)
 INSERT INTO namespace(ns_id, ns_label)
   SELECT 1, 'default' WHERE NOT EXISTS(SELECT ns_id FROM namespace WHERE ns_id=1);
 
-CREATE TABLE IF NOT EXISTS service
-  ( s_id          INTEGER NOT NULL -- Service ID. Shifted by 2 ^ 63
-  , s_namespace   INTEGER NOT NULL
-  , s_label       TEXT
-
-  , s_path        TEXT NOT NULL    -- Path to service directory
-
-  , s_runas       INTEGER          -- Unix UID to run this service
-                                   -- as. Can only be set by a cluster
-                                   -- administrator
-
-  , CONSTRAINT s_label_unique UNIQUE(s_namespace, s_label)
-  , CONSTRAINT s_namespace_fk
-      FOREIGN KEY (s_namespace)
-      REFERENCES  namespace(ns_id)
-      ON DELETE CASCADE
-  , PRIMARY KEY(s_namespace, s_id)
-  );
-
 CREATE TABLE IF NOT EXISTS node
   ( n_id          TEXT PRIMARY KEY     -- Node ID (typically a UUID)
   , n_hostname    TEXT NOT NULL UNIQUE -- Hostname
@@ -103,17 +84,13 @@ CREATE TABLE IF NOT EXISTS node_resource
 
 CREATE TABLE IF NOT EXISTS process
   ( ps_id         INTEGER NOT NULL
-  , ps_svc        INTEGER NOT NULL
+  , ps_image      TEXT NOT NULL -- Nix path to process image
   , ps_ns         INTEGER NOT NULL
 
   , ps_state      TEXT NOT NULL
   , ps_placement  TEXT
 
   , PRIMARY KEY(ps_ns, ps_id)
-  , CONSTRAINT ps_service_fk
-      FOREIGN KEY (ps_svc, ps_ns)
-      REFERENCES service(s_id, s_namespace)
-      ON DELETE CASCADE
   , CONSTRAINT ps_state_enum
       CHECK (ps_state in ('scheduling', 'starting', 'up', 'down', 'zombie'))
   );

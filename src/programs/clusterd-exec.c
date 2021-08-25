@@ -70,11 +70,7 @@ static const char *create_process_lua =
   "end\n"
   "clusterd.output(node.hostname)\n"
 
-  "svc = clusterd.get_service(params.namespace, params.service)\n"
-  "if svc == nil then\n"
-  "  error('service ' .. params.service .. ' in namespace ' .. params.namespace .. ' not found')\n"
-  "end\n"
-  "pid = clusterd.new_process(params.namespace, svc.s_id,\n"
+  "pid = clusterd.new_process(params.namespace, params.image,\n"
   "                           { placement = node.id })\n"
   "clusterd.output(pid)\n";
 
@@ -245,7 +241,7 @@ static void push_arg(const char ***args, const char *arg) {
   (*args)[i + 1] = NULL;
 }
 
-static const char *schedule_process(clusterctl *ctl, const char *namespace, const char *service) {
+static const char *schedule_process(clusterctl *ctl) {
   int outpipe[2], err;
   pid_t child;
 
@@ -268,10 +264,6 @@ static const char *schedule_process(clusterctl *ctl, const char *namespace, cons
     push_arg(&args, "clusterd-schedule");
     if ( CLUSTERD_LOG_LEVEL <= CLUSTERD_DEBUG )
       push_arg(&args, "-v");
-    push_arg(&args, "-n");
-    push_arg(&args, namespace);
-    push_arg(&args, "-s");
-    push_arg(&args, service);
     push_arg(&args, "-t");
     push_arg(&args, "30");
 
@@ -337,7 +329,7 @@ static const char *schedule_process(clusterctl *ctl, const char *namespace, cons
 }
 
 static int create_process(clusterctl *ctl,
-                          const char *namespace, const char *service,
+                          const char *namespace, const char *image,
                           const char *pinnednode, clusterd_pid_t *pid,
                           char *pinnedaddr, size_t pinnedaddrlen) {
   int err;
@@ -347,7 +339,7 @@ static int create_process(clusterctl *ctl,
   err = clusterctl_call_simple(ctl, CLUSTERCTL_MAY_WRITE, create_process_lua,
                                newprocstr, sizeof(newprocstr),
                                "namespace", namespace,
-                               "service", service,
+                               "image", image,
                                "pinned", pinnednode,
                                NULL);
   if ( err < 0 ) {
@@ -404,7 +396,7 @@ clusterd_exec_wait parse_wait_condition(const char *c) {
 }
 
 static int launch_service(clusterctl *ctl, const char *nodeaddr,
-                          const char *namespace, const char *service, clusterd_pid_t pid,
+                          const char *namespace, const char *image, clusterd_pid_t pid,
                           int keep_logs, int interactive,
                           int argc, char *const *argv) {
   const char **new_argv, *cmd;
@@ -419,8 +411,8 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
     return -1;
   }
 
-  CLUSTERD_LOG(CLUSTERD_INFO, "Launching service %s with %d argument(s) on %s",
-               service, argc, nodeaddr);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Launching service %s with %d argument(s) on %s",
+               image, argc, nodeaddr);
 
   // If the node hostname matches our hostname, then we don't need to
   // use ssh
@@ -468,7 +460,7 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Sending monitor %s", m->monitor_spec);
   }
 
-  new_argv[argind++] = service;
+  new_argv[argind++] = image; // TODO clusterd-host should get this from the process record, not here
   new_argv[argind++] = "--";
   memcpy(new_argv, argv, sizeof(*new_argv) * argc);
   argind += argc;
@@ -560,7 +552,7 @@ static int add_monitor(const char *monitor) {
 
 int main(int argc, char *const *argv) {
   int c;
-  const char *namespace = "default", *service = NULL, *pinnednode = NULL,
+  const char *namespace = "default", *image = NULL, *pinnednode = NULL,
     *nodeaddr = NULL;
   char *end;
   int retries, firstarg = -1, redirect_stdout = 0, redirect_stdin = 0, keep_logs = 0, err;
@@ -595,7 +587,7 @@ int main(int argc, char *const *argv) {
         }
       } else {
         firstarg = optind;
-        service = optarg;
+        image = optarg;
         goto argsdone;
       }
       break;
@@ -694,7 +686,7 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  if ( !service ) {
+  if ( !image ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "A service must be specified\n");
     return 1;
   }
@@ -706,17 +698,17 @@ int main(int argc, char *const *argv) {
   }
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Starting a process in service %s (namespace %s)\n",
-               service, namespace);
+               image, namespace);
 
   if ( !pinnednode )
-    pinnednode = schedule_process(&ctl, namespace, service);
+    pinnednode = schedule_process(&ctl); // TODO pass scheduling constraints to process
 
   if ( !pinnednode )
     CLUSTERD_LOG(CLUSTERD_ERROR, "No node could be chosen for scheduling");
 
   /* First we find the service and make sure it exists, and create a
    * process in the scheduling state */
-  err = create_process(&ctl, namespace, service, pinnednode, &pid,
+  err = create_process(&ctl, namespace, image, pinnednode, &pid,
                        pinnednodeaddr, sizeof(pinnednodeaddr));
   /* Read the pid and maybe the node id */
   if ( err < 0 ) {
@@ -752,7 +744,7 @@ int main(int argc, char *const *argv) {
 
   if ( firstarg < 0 ) firstarg = argc;
 
-  err = launch_service(&ctl, nodeaddr, namespace, service, pid,
+  err = launch_service(&ctl, nodeaddr, namespace, image, pid,
                        keep_logs, redirect_stdin || redirect_stdout,
                        argc - firstarg, argv + firstarg);
   if ( err < 0 ) {

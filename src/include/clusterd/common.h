@@ -35,19 +35,15 @@
 #define NS_PER_SEC 1000000000
 
 typedef uint32_t clusterd_namespace_t;
-typedef uint32_t clusterd_service_t;
 typedef uint32_t clusterd_pid_t;
 typedef uint32_t clusterd_endpoint_t;
 
 #define NS_F   "%u"
-#define SVC_F  "%u"
 #define PID_F  "%u"
 #define EP_F   "%u"
 
 #define CLUSTERD_NTOH_NAMESPACE(ns) be64toh(ns)
 #define CLUSTERD_HTON_NAMESPACE(ns) htobe64(ns)
-#define CLUSTERD_NTOH_SERVICE(s)    be64toh(s)
-#define CLUSTERD_HTON_SERVICE(s)    htobe64(s)
 #define CLUSTERD_NTOH_PROCESS(i)    ntohl(i)
 #define CLUSTERD_HTON_PROCESS(i)    htonl(i)
 

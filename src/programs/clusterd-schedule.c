@@ -733,7 +733,7 @@ static void start_threads() {
 
   for ( i = 0; i < nprocs; ++i ) {
     pthread_t hdl;
-    
+
     err = pthread_create(&hdl, NULL, node_processor_worker, NULL);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not launch node processor worker: %s", strerror(errno));
@@ -753,13 +753,13 @@ static void start_threads() {
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not restore signal set. Alarm may not sound");
   }
-}  
+}
 
 static int enqueue_node(struct node_entry *entry) {
   int ret = 0;
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Enqueueing node %s (hostname=%s)", entry->nodeid, entry->hostname);
-  
+
   if ( !g_node_threads_started )
     start_threads();
 
@@ -932,10 +932,8 @@ static void start_timeout(int timeout) {
 
 static void usage() {
   fprintf(stderr, "clusterd-schedule -- find nodes to run a clusterd payload\n");
-  fprintf(stderr, "Usage: clusterd-schedule -vhf [-n NAMESPACE] [-l LIMIT...] [-g RESOURCE...]\n");
-  fprintf(stderr, "         [-N COUNT] [-t TIMEOUT] -s SERVICE\n\n");
-  fprintf(stderr, "   -n NAMESPACE     Namespace to lookup service in\n");
-  fprintf(stderr, "   -s SERVICE       The service that we want to schedule\n");
+  fprintf(stderr, "Usage: clusterd-schedule -vhf [-l LIMIT...] [-g RESOURCE...]\n");
+  fprintf(stderr, "         [-N COUNT] [-t TIMEOUT]\n\n");
   fprintf(stderr, "   -N COUNT[:MAX]   Max number of nodes to return, optionally with the max to examine\n");
   fprintf(stderr, "   -l LIMIT         Specify additional limit requests. Limit requests take\n");
   fprintf(stderr, "                    the form RESOURCECLASS[=REQUEST][!][@WEIGHT].\n");
@@ -976,7 +974,6 @@ static int parse_node_count_and_max(const char *arg, int *count, int *max) {
 
 int main(int argc, char *const *argv) {
   int c, err;
-  const char *namespace = "default", *service = NULL;
   clusterctl ctl;
 
   char nodebuf[64 * 1024];
@@ -996,7 +993,7 @@ int main(int argc, char *const *argv) {
   if ( !g_clusterd_stats_cmd )
     g_clusterd_stats_cmd = "clusterd-stats";
 
-  while ( (c = getopt(argc, argv, "l:g:n:s:N:t:vhf")) != -1 ) {
+  while ( (c = getopt(argc, argv, "l:g:N:t:vhf")) != -1 ) {
     switch ( c ) {
     case 'l':
       // Add this limit in to the limit set
@@ -1008,10 +1005,6 @@ int main(int argc, char *const *argv) {
       // Make sure the global resource parses
       err = add_global_resource_constraint(optarg);
       if ( err < 0 ) return 1;
-      break;
-
-    case 'n':
-      namespace = optarg;
       break;
 
     case 'N':
@@ -1032,10 +1025,6 @@ int main(int argc, char *const *argv) {
 	timeout = -1;
       break;
 
-    case 's':
-      service = optarg;
-      break;
-
     case 'f':
       collect_service_constraints = 0;
       break;
@@ -1053,12 +1042,6 @@ int main(int argc, char *const *argv) {
       usage();
       return 1;
     }
-  }
-
-  if ( !service ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "No service provided");
-    usage();
-    return 1;
   }
 
   g_chosen_node_capacity = max_nodes;

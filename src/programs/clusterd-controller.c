@@ -189,11 +189,11 @@ static int is_valid_sha256(const char *s) {
 
 static void usage() {
   fprintf(stderr, "clusterd-controller -- clusterd controller daemon\n");
-  fprintf(stderr, "Usage: clusterd-controller -vhB [-j address...] -S ADDR\n");
+  fprintf(stderr, "Usage: clusterd-controller -vhB [-j address...] [-S ADDR...]\n");
   fprintf(stderr, "         nodeid/bindaddress /path/to/state/dir\n\n");
   fprintf(stderr, "   -j ADDR          When bootstrapping, specify this option\n");
   fprintf(stderr, "                    for each peer in the cluster\n");
-  fprintf(stderr, "   -S SERVICEADDR   Address to serve the local service on\n");
+  fprintf(stderr, "   -S SERVICEADDR   Addresses to serve the local service on\n");
   fprintf(stderr, "   -B               Force a bootstrap on this node, even if state dir exists\n");
   fprintf(stderr, "   -h               Show this help menu\n");
   fprintf(stderr, "   -v               Show verbose debugging output\n\n");

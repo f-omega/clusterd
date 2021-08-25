@@ -105,7 +105,6 @@ monitor *g_monitors = NULL;
 char g_ps_path[PATH_MAX] = "";
 
 clusterd_namespace_t  g_nsid = 0;
-clusterd_service_t    g_sid  = 0;
 clusterd_pid_t        g_pid  = 0;
 sig_atomic_t   g_down_signal = -1;
 
@@ -140,31 +139,17 @@ uint32_t       g_sigordinal_last = 0; // Last sgnal delivered
 pid_t          g_sigdelivery_pid = -1;
 int            g_sigdelivery_pipe[2];
 
-const char *get_service_path_lua =
-  "ns_id = clusterd.resolve_namespace(params.namespace)\n"
-  "if ns_id == nil then\n"
-  "  error('namespace ' .. params.namespace .. ' does not exist')\n"
-  "end\n"
-  "s_id = clusterd.resolve_service(ns_id, params.service)\n"
-  "if s_id == nil then\n"
-  "  error('service ' .. params.service .. ' does not exist')\n"
-  "end\n"
-  "svc = clusterd.get_service(ns_id, s_id)\n"
-  "clusterd.output(ns_id)\n"
-  "clusterd.output(s_id)\n"
-  "clusterd.output(svc.s_path)\n";
-
-const char *update_proc_state_lua =
+static const char *update_proc_state_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
   "clusterd.update_process(nsid, pid, { state = params.state })\n";
 
-const char *remove_process_lua =
+static const char *remove_process_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
   "clusterd.delete_process(nsid, pid)\n";
 
-const char *mark_all_signals_lua =
+static const char *mark_all_signals_lua =
   "q = clusterd.get_signal_queue(params.namespace, params.process)\n"
   "if q == nil then\n"
   "  error('could not get signal queue for process')\n"
@@ -173,7 +158,7 @@ const char *mark_all_signals_lua =
   "  clusterd.mark_signal(params.namespace, params.process, q.latest_signal)\n"
   "end\n";
 
-const char *get_next_signal_lua =
+static const char *get_next_signal_lua =
   "sigordinal = tonumber(params.sigordinal)\n"
   "q = clusterd.get_signal_queue(params.namespace, params.process)\n"
   "if q == nil then \n"
@@ -188,7 +173,7 @@ const char *get_next_signal_lua =
 static void usage() {
   fprintf(stderr, "clusterd-host - supervise a clusterd process\n");
   fprintf(stderr, "Usage: clusterd-host -vhdi [-n NAMESPACE] [-m MONITOR...] -p PID -I INTERVAL\n");
-  fprintf(stderr, "         SERVICEID args...\n\n");
+  fprintf(stderr, "         IMAGEPATH args...\n\n");
   fprintf(stderr, "   -n NAMESPACE   Execute the service in the given namespace.\n");
   fprintf(stderr, "                  If not specified, defaults to the default namespace.\n");
   fprintf(stderr, "   -m MONITOR     Specify one or more monitor nodes. If none\n");
@@ -200,73 +185,35 @@ static void usage() {
   fprintf(stderr, "   -d             Run in debug mode and print logs to a file (default: discard)\n");
   fprintf(stderr, "   -v             Display verbose debug output\n");
   fprintf(stderr, "   -h             Show this help menu\n");
-  fprintf(stderr, "   SERVICEID      The name or ID of the service to start\n\n");
-  fprintf(stderr, "All arguments after the service ID are passed directly to the service run script\n\n");
+  fprintf(stderr, "   IMAGEPATH      The /nix/ path of the service to start\n\n");
+  fprintf(stderr, "All arguments after the image path are passed directly to the service run script\n\n");
   fprintf(stderr, "Please report bugs to support@f-omega.com\n");
 }
 
-static int parse_service_details(char *info, clusterd_namespace_t *ns, clusterd_service_t *svc,
-                                 char *path, size_t pathsz) {
-  char *cur, *nl, *dend;
-  size_t len;
+static int pin_image(const char *path) {
+  char image_path[PATH_MAX * 2];
+  int err;
 
-  cur = info;
+  err = snprintf(image_path, sizeof(image_path), "%s/image", g_ps_path);
+  if ( err >= sizeof(image_path) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Image path too long");
 
-  /* Namespace */
-  nl = strchr(cur, '\n');
-  if ( !nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not find namespace id in controller return");
-    errno = EPROTO;
+    errno = ENAMETOOLONG;
     return -1;
   }
 
-  *nl = '\0';
-  errno = 0;
-  *ns = strtoll(cur, &dend, 10);
-  if ( errno != 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not parse namespace id: %s", strerror(errno));
-    return -1;
-  }
-  if ( dend != nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Garbage after namespace id");
-    errno = EPROTO;
+  err = symlink(path, image_path);
+  if ( err != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not link image path: %s", strerror(errno));
+
     return -1;
   }
 
-  cur = dend + 1;
+  // Now run nix-store --add-root --indirect
+  err = snprintf(image_path, sizeof(image_path), "nix-store --add-root %s/image --indirect", g_ps_path);
+  if ( err >= sizeof(image_path) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "nix-store --add-root command is too long");
 
-  nl = strchr(cur, '\n');
-  if ( !nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not find service id in controller return");
-    errno = EPROTO;
-    return -1;
-  }
-
-  *nl = '\0';
-  errno = 0;
-  *svc = strtoll(cur, &dend, 10);
-  if ( errno != 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not parse service id: %s", strerror(errno));
-    return -1;
-  }
-  if ( dend != nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Garbage after service id");
-    errno = EPROTO;
-    return -1;
-  }
-
-  cur = dend + 1;
-
-  nl = strchr(cur, '\n');
-  if ( !nl ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not find service path in controller return");
-    errno = EPROTO;
-    return -1;
-  }
-
-  *nl = '\0';
-  len = snprintf(path, pathsz, "%s", cur);
-  if ( len >= pathsz ) {
     errno = ENAMETOOLONG;
     return -1;
   }
@@ -842,80 +789,6 @@ static int setup_service_signals(sigset_t *oldmask) {
   return 0;
 }
 
-static int download_image(const char *image, char *realpath, size_t realpathsz) {
-  char dlimage[PATH_MAX];
-  pid_t child;
-  const char *imgdir;
-  int err;
-
-  if ( realpathsz == 0 ) {
-    errno = EINVAL;
-    return -1;
-  }
-
-  err = snprintf(dlimage, sizeof(dlimage), "%s/dlimage", clusterd_get_config_dir());
-  if ( err >= sizeof(dlimage) ) {
-    errno = ENAMETOOLONG;
-    return -1;
-  }
-
-  err = snprintf(realpath, realpathsz, "%s/image", g_ps_path);
-  if ( err >= realpathsz ) {
-    errno = ENAMETOOLONG;
-    return -1;
-  }
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Downloading image %s to %s using %s", image, realpath, dlimage);
-
-  child = fork();
-  if ( child < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fork to download image: %s", strerror(errno));
-    return -1;
-  } else if ( child == 0 ) {
-    /* In the child... Execute the script via the pipe */
-    close(STDIN_FILENO);
-
-    /* Set CLUSTERD_IMAGES environment to default, but don't overwrite
-     * if it exists */
-    setenv("CLUSTERD_IMAGES", CLUSTERD_DEFAULT_IMAGE_PATH, 0);
-
-    err = execl(dlimage, "dlimage", image, realpath, NULL);
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute dlimage script: %s", strerror(errno));
-    exit(101);
-  } else {
-    int exitstatus;
-    pid_t werr;
-
-    werr = waitpid(child, &exitstatus, 0);
-    if ( werr != child ) {
-      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get dlimage status: %s", strerror(errno));
-      return -1;
-    }
-
-    if ( WIFEXITED(exitstatus) &&
-         WEXITSTATUS(exitstatus) != 0 ) {
-      if ( WEXITSTATUS(exitstatus)
-           != 101 ) {
-        CLUSTERD_LOG(CLUSTERD_ERROR, "dlimage returned abnormal error code %d",
-                     WEXITSTATUS(exitstatus));
-      }
-      errno = ECOMM;
-      return -1;
-    } else if ( WIFSIGNALED(exitstatus) ) {
-      CLUSTERD_LOG(CLUSTERD_ERROR, "dlimage killed by signal %d",
-                   WTERMSIG(exitstatus));
-      errno = ECOMM;
-      return -1;
-    } else if ( !(WIFEXITED(exitstatus)) ) {
-      CLUSTERD_LOG(CLUSTERD_ERROR, "dlimage exited abnormally");
-      errno = ECOMM;
-      return -1;
-    }
-  }
-
-  return 0;
-}
-
 static void random_cookie(unsigned char *out, size_t len) {
   size_t bytes = 0;
   int i = 0;
@@ -950,7 +823,6 @@ static void send_monitor_heartbeat(monitor *m) {
   clusterd_attr *attr;
 
   clusterd_namespace_t n_nsid = CLUSTERD_HTON_NAMESPACE(g_nsid);
-  clusterd_service_t   n_sid  = CLUSTERD_HTON_SERVICE(g_sid);
   clusterd_pid_t       n_pid  = CLUSTERD_HTON_PROCESS(g_pid);
   uint32_t          interval  = htonl(g_ping_interval);
 
@@ -968,9 +840,6 @@ static void send_monitor_heartbeat(monitor *m) {
 
   CLUSTERD_ADD_ATTR(buf, bufoffs, attroffs, CLUSTERD_ATTR_NAMESPACE);
   CLUSTERD_WRITE_ATTR(buf, bufoffs, &n_nsid, sizeof(n_nsid));
-
-  CLUSTERD_ADD_ATTR(buf, bufoffs, attroffs, CLUSTERD_ATTR_SERVICE);
-  CLUSTERD_WRITE_ATTR(buf, bufoffs, &n_sid, sizeof(n_sid));
 
   CLUSTERD_ADD_ATTR(buf, bufoffs, attroffs, CLUSTERD_ATTR_PROCESS);
   CLUSTERD_WRITE_ATTR(buf, bufoffs, &n_pid, sizeof(n_pid));
@@ -2111,51 +1980,6 @@ static pid_t daemonize() {
   }
 }
 
-static int get_service_info(const char *namespace, const char *service,
-                            clusterd_namespace_t *nsid, clusterd_service_t *sid,
-                            char *path, size_t pathlen) {
-  char s_info[PATH_MAX*3];
-  int err;
-  clusterctl ctl;
-
-  err = clusterctl_open(&ctl);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open cluster: %s", strerror(errno));
-    return -1;
-  }
-
-  /* Find details about the requested service, like the image path */
-  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
-                               get_service_path_lua,
-                               s_info, sizeof(s_info),
-                               "namespace", namespace,
-                               "service", service,
-                               NULL);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT,
-                 "Could not fetch service details: %s", strerror(errno));
-    goto error;
-  }
-
-  // Parse service information
-  err = parse_service_details(s_info, nsid, sid, path, pathlen);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT,
-                 "Invalid service details returned from controller: %s", strerror(errno));
-    goto error;
-  }
-
-  clusterctl_close(&ctl);
-  return 0;
-
- error:
-  err = errno;
-  clusterctl_close(&ctl);
-  errno = err;
-
-  return -1;
-}
-
 static int remove_process() {
   clusterctl ctl;
   int err;
@@ -2274,8 +2098,8 @@ static int record_and_reconcile_states() {
 
 int main(int argc, char *const *argv) {
   int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, wants_logs = 0, interactive = 0, stspipe;
-  const char *namespace = "default", *service = NULL;
-  char realpath[PATH_MAX], path[PATH_MAX], *pidend;
+  const char *namespace = "default", *path = NULL;
+  char realpath[PATH_MAX], *pidend;
   char *const *svargv;
   pid_t ps, daemon_pid;
   sigset_t smask;
@@ -2356,11 +2180,11 @@ int main(int argc, char *const *argv) {
     return 1;
   }
 
-  service = argv[firstarg];
+  path = argv[firstarg];
   svargc = argc - firstarg - 1;
   svargv = argv + firstarg + 1;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p)", service, argv[firstarg]);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p)", path, argv[firstarg]);
 
   /* Read the system configuration */
   err = clusterd_read_system_config(read_gid_and_uid_ranges);
@@ -2385,15 +2209,8 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not open /dev/urandom... Monitor requests may be insecure");
   }
 
-  err = get_service_info(namespace, service, &g_nsid, &g_sid, path, sizeof(path));
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fetch service details");
-    fclose(g_urandom);
-    goto cleanup_proc;
-  }
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Running service " SVC_F " in namespace " NS_F ": path %s",
-               g_sid, g_nsid, path);
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Running service in namespace " NS_F ": path %s",
+               g_nsid, path);
 
   if ( g_nsid >= g_ns_uid_count ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "We do not have enough namespace UIDs to map this namespace's root account");
@@ -2451,9 +2268,7 @@ int main(int argc, char *const *argv) {
 
   /* Steps to run the process:
    *
-   *   1. Ensure the image is downloaded by running the user-provided
-   *      image fetching utility. Make sure process is in a runnable
-   *      state.
+   *   1. Pin the image so nix knows not to delete it
    *
    *   2. Contact all process monitors. If monitors cannot be
    *      contacted, the process is degraded. We run
@@ -2471,15 +2286,14 @@ int main(int argc, char *const *argv) {
    * On SIGQUIT or SIGTERM, we send the same signal to our child and
    * wait for it to finish.
    */
-  err = download_image(path, realpath, sizeof(realpath));
+
+  // TODO pin the image
+  err = pin_image(path);
   if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not download image %s: %s",
-                 path, strerror(errno));
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not pin image: %s", strerror(errno));
     fclose(g_urandom);
     goto cleanup_proc;
   }
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Downloaded image to %s", realpath);
 
   if ( (g_socket4 < 0 &&
         g_socket6 < 0) ||
@@ -2582,36 +2396,39 @@ int main(int argc, char *const *argv) {
       FD_SET(stspipe, &rfds);
       FD_SET(stspipe, &efds);
 
-      werr = waitpid(ps, &sts, WNOHANG);
-      if ( werr < 0 ) {
-        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child: %s", strerror(errno));
-        g_state = PROCESS_COMPLETE;
-        break;
-      } else if ( werr > 0 ) {
-        if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 100 ) {
-          CLUSTERD_LOG(CLUSTERD_CRIT, "Internal process error: %u", WEXITSTATUS(sts));
+      if ( ps != 0 ) {
+        werr = waitpid(ps, &sts, WNOHANG);
+        if ( werr < 0 ) {
+          CLUSTERD_LOG(CLUSTERD_ERROR, "Could not wait for child: %s", strerror(errno));
           g_state = PROCESS_COMPLETE;
-          continue;
-        }
+          break;
+        } else if ( werr > 0 ) {
+          if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 100 ) {
+            CLUSTERD_LOG(CLUSTERD_CRIT, "Internal process error: %u", WEXITSTATUS(sts));
+            g_state = PROCESS_COMPLETE;
+            continue;
+          }
 
-        if ( WIFEXITED(sts) )
-          CLUSTERD_LOG(CLUSTERD_ERROR, "Process has exited: %u", WEXITSTATUS(sts));
-        else if ( WIFSIGNALED(sts) )
-          CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed due to signal %d", WTERMSIG(sts));
-        else
-          CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed because of status: %u", sts);
+          if ( WIFEXITED(sts) )
+            CLUSTERD_LOG(CLUSTERD_ERROR, "Process has exited: %u", WEXITSTATUS(sts));
+          else if ( WIFSIGNALED(sts) )
+            CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed due to signal %d", WTERMSIG(sts));
+          else
+            CLUSTERD_LOG(CLUSTERD_ERROR, "Process killed because of status: %u", sts);
 
-        if ( g_state == PROCESS_STARTED )
-          process_failure(&ps, sts, &smask);
-        else if ( g_state == PROCESS_FAILURE ) {
-          CLUSTERD_LOG(CLUSTERD_INFO, "Finish script complete");
-          g_state = PROCESS_RECOVERED;
-        } else if ( g_state == PROCESS_DYING ) {
-          g_state = PROCESS_COMPLETE;
-          continue;
-        } else {
-          CLUSTERD_LOG(CLUSTERD_CRIT, "Received SIGCHLD from unknown state %d", g_state);
-          g_state = PROCESS_COMPLETE;
+          if ( g_state == PROCESS_STARTED ) {
+            g_state = PROCESS_FAILURE;
+            process_failure(&ps, sts, &smask);
+          } else if ( g_state == PROCESS_FAILURE ) {
+            CLUSTERD_LOG(CLUSTERD_INFO, "Finish script complete");
+            g_state = PROCESS_RECOVERED;
+          } else if ( g_state == PROCESS_DYING ) {
+            g_state = PROCESS_COMPLETE;
+            continue;
+          } else {
+            CLUSTERD_LOG(CLUSTERD_CRIT, "Received SIGCHLD from unknown state %d", g_state);
+            g_state = PROCESS_COMPLETE;
+          }
         }
       }
 
@@ -2739,6 +2556,7 @@ int main(int argc, char *const *argv) {
              timespec_cmp(&now, &g_next_kill) >= 0 ) {
           CLUSTERD_LOG(CLUSTERD_CRIT, "Process did not die on time. Killing");
           kill_process(ps);
+          ps = 0;
           g_state = PROCESS_COMPLETE;
         }
 
