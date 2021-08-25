@@ -395,6 +395,62 @@ clusterd_exec_wait parse_wait_condition(const char *c) {
     return CLUSTERD_EXEC_WAIT_INVALID;
 }
 
+static int copy_image(const char *nodeaddr, const char *image) {
+  pid_t child;
+  char remotestore[PATH_MAX];
+  int err;
+
+  err = snprintf(remotestore, sizeof(remotestore), "s3://clusterd@%s", nodeaddr);
+  if ( err >= sizeof(remotestore) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  child = fork();
+  if ( child < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fork() nix-copy command");
+    return -1;
+  } else if ( child == 0 ) {
+    const char *argv[10], *nixstore;
+    int argind = 0;
+    memset(argv, 0, sizeof(argv));
+
+    argv[argind++] = "nix";
+    argv[argind++] = "copy";
+
+    nixstore = getenv("CLUSTERD_NIX_STORE");
+    if ( nixstore ) {
+      argv[argind++] = "--store";
+      argv[argind++] = nixstore;
+    }
+
+    argv[argind++] = "--to";
+    argv[argind++] = remotestore;
+
+    argv[argind++] = image;
+
+    execvp("nix", (char *const *) argv);
+    exit(EXIT_FAILURE);
+  } else {
+    int wsts;
+
+    err = waitpid(child, &wsts, 0);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Could not wait for nix copy command: %s", strerror(errno));
+      return -1;
+    }
+
+    // Check status
+    if ( WIFEXITED(wsts) && WEXITSTATUS(wsts) == 0 ) {
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Copied image successfully");
+      return 0;
+    } else {
+      LOG_CHILD_STATUS(CLUSTERD_ERROR, wsts, "'nix copy'");
+      return -1;
+    }
+  }
+}
+
 static int launch_service(clusterctl *ctl, const char *nodeaddr,
                           const char *namespace, const char *image, clusterd_pid_t pid,
                           int keep_logs, int interactive,
@@ -743,6 +799,12 @@ int main(int argc, char *const *argv) {
   }
 
   if ( firstarg < 0 ) firstarg = argc;
+
+  err = copy_image(nodeaddr, image);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not copy image to host %s", nodeaddr);
+    goto cleanup;
+  }
 
   err = launch_service(&ctl, nodeaddr, namespace, image, pid,
                        keep_logs, redirect_stdin || redirect_stdout,

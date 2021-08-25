@@ -44,17 +44,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define LOG_CHILD_STATUS(lvl, ec, what)                                  \
-  do {                                                                  \
-    if ( WIFEXITED(ec) ) {                                              \
-      CLUSTERD_LOG(lvl, what " exited with code %d", WEXITSTATUS(ec)); \
-    } else if ( WIFSIGNALED(ec) ) {                                     \
-      CLUSTERD_LOG(lvl, what " killed by signal %d", WTERMSIG(ec)); \
-    } else {                                                        \
-      CLUSTERD_LOG(lvl, what " exited for unknown reason");         \
-    }                                                               \
-  } while ( 0 )
-
 #define MONITOR_COOKIE_LENGTH 64
 
 #define DEFAULT_SIGTERM_GRACE 10000

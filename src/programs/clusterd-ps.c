@@ -38,7 +38,7 @@ const char *list_processes_lua =
   "function list_processes(nsid)\n"
   "  procs = clusterd.list_processes(nsid, { resolve_names = true })\n"
   "  for _, proc in ipairs(procs) do\n"
-  "    clusterd.output(proc.ps_id .. '\t' .. (proc.ps_svc_name or proc.ps_svc) .. '\t' .."
+  "    clusterd.output(proc.ps_id .. '\t' .. proc.ps_image .. '\t' .."
   "       (proc.ps_ns_name or proc.ps_ns) .. '\t' .. proc.ps_state .. '\t' .. (proc.ps_placement or ''))\n"
   "  end\n"
   "end\n"

@@ -25,6 +25,17 @@
     clusterd_hexdump(stderr, buf, sz);          \
   }
 
+#define LOG_CHILD_STATUS(lvl, ec, what)                                  \
+  do {                                                                  \
+    if ( WIFEXITED(ec) ) {                                              \
+      CLUSTERD_LOG(lvl, what " exited with code %d", WEXITSTATUS(ec)); \
+    } else if ( WIFSIGNALED(ec) ) {                                     \
+      CLUSTERD_LOG(lvl, what " killed by signal %d", WTERMSIG(ec)); \
+    } else {                                                        \
+      CLUSTERD_LOG(lvl, what " exited for unknown reason");         \
+    }                                                               \
+  } while ( 0 )
+
 static inline void clusterd_hexdump(FILE *f, void *p, size_t sz) {
   uint8_t *b = (uint8_t *)p;
   size_t i = 0;
