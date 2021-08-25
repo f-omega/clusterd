@@ -989,13 +989,14 @@ static void close_fds() {
     close(g_sigdelivery_pipe[1]);
 }
 
-static int exec_service(pid_t *ps, sigset_t *oldmask, char *svpath, int svargc, char *const *svargv) {
+static int exec_service(pid_t *ps, sigset_t *oldmask, int svargc, char *const *svargv) {
   char servicerun[PATH_MAX];
   int err, stspipe[2];
   pid_t child;
 
  // TODO run prepare script the first time around
-  err = snprintf(servicerun, sizeof(servicerun), "%s/run", svpath);
+  err = snprintf(servicerun, sizeof(servicerun), "%s/proc/" NS_F "/" PID_F "/image/run",
+                 clusterd_get_runtime_dir(), g_nsid, g_pid);
   if ( err >= sizeof(servicerun) ) {
     errno = ENAMETOOLONG;
     return -1;
@@ -2131,7 +2132,7 @@ static int record_and_reconcile_states() {
 int main(int argc, char *const *argv) {
   int c, firstarg = -1, err, svargc, had_pid = 0, ppid, running = 0, wants_logs = 0, interactive = 0, stspipe;
   const char *namespace = "default", *path = NULL;
-  char realpath[PATH_MAX], *pidend;
+  char *pidend;
   char *const *svargv;
   pid_t ps, daemon_pid;
   sigset_t smask;
@@ -2386,7 +2387,7 @@ int main(int argc, char *const *argv) {
     }
 
     /* Execute the service binary */
-    err = exec_service(&ps, &smask, realpath, svargc, svargv);
+    err = exec_service(&ps, &smask, svargc, svargv);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not execute service: %s", strerror(errno));
       /* Monitors will start the service doctor */
@@ -2581,7 +2582,7 @@ int main(int argc, char *const *argv) {
              timespec_cmp(&now, &g_next_start) >= 0 ) {
           CLUSTERD_LOG(CLUSTERD_DEBUG, "Cooloff period passed. Restarting service");
 
-          err = exec_service(&ps, &smask, realpath, svargc, svargv);
+          err = exec_service(&ps, &smask, svargc, svargv);
           if ( err < 0 ) {
             CLUSTERD_LOG(CLUSTERD_CRIT, "Could not restart service: %s", strerror(errno));
             g_state = PROCESS_COMPLETE;
