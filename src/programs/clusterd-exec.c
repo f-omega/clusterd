@@ -400,7 +400,7 @@ static int copy_image(const char *nodeaddr, const char *image) {
   char remotestore[PATH_MAX];
   int err;
 
-  err = snprintf(remotestore, sizeof(remotestore), "s3://clusterd@%s", nodeaddr);
+  err = snprintf(remotestore, sizeof(remotestore), "ssh://clusterd@%s", nodeaddr);
   if ( err >= sizeof(remotestore) ) {
     errno = ENAMETOOLONG;
     return -1;
