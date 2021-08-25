@@ -128,6 +128,13 @@ uint32_t       g_sigordinal_last = 0; // Last sgnal delivered
 pid_t          g_sigdelivery_pid = -1;
 int            g_sigdelivery_pipe[2];
 
+static const char *lookup_ns_lua =
+  "nsid = clusterd.resolve_namespace(params.namespace)\n"
+  "if nsid == nil then\n"
+  "  error('namespace does not exist')\n"
+  "end\n"
+  "clusterd.output(tostring(nsid))\n";
+
 static const char *update_proc_state_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
@@ -177,6 +184,42 @@ static void usage() {
   fprintf(stderr, "   IMAGEPATH      The /nix/ path of the service to start\n\n");
   fprintf(stderr, "All arguments after the image path are passed directly to the service run script\n\n");
   fprintf(stderr, "Please report bugs to support@f-omega.com\n");
+}
+
+static int lookup_nsid(const char *namespace, clusterd_namespace_t *nsid) {
+  char nsidbuf[64];
+  clusterctl ctl;
+  int err;
+
+  err = clusterctl_open(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl: %s", strerror(errno));
+    return -1;
+  }
+
+  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
+                               lookup_ns_lua,
+                               nsidbuf, sizeof(nsidbuf),
+                               "namespace", namespace,
+                               NULL);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup namespace: %s", strerror(errno));
+    goto error;
+  }
+
+  clusterctl_close(&ctl);
+
+  err = sscanf(nsidbuf, NS_F, nsid);
+  if ( err != 1 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Returned value is not an nsid: %s", nsidbuf);
+    return -1;
+  }
+
+  return 0;
+
+ error:
+  clusterctl_close(&ctl);
+  return -1;
 }
 
 static int pin_image(const char *path) {
@@ -2173,7 +2216,13 @@ int main(int argc, char *const *argv) {
   svargc = argc - firstarg - 1;
   svargv = argv + firstarg + 1;
 
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p) in namespace %s", path, argv[firstarg], namespace);
+  err = lookup_nsid(namespace, &g_nsid);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Namespace %s does not exist", namespace);
+    return 1;
+  }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Supervising service %s (%p) in namespace %s (%d)", path, argv[firstarg], namespace, g_nsid);
 
   /* Read the system configuration */
   err = clusterd_read_system_config(read_gid_and_uid_ranges);
