@@ -1845,6 +1845,7 @@ int main(int argc, char *const *argv) {
     err = raft_bootstrap(&raft, &raft_conf);
     if ( err != 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not bootstrap node: %s", raft_errmsg(&raft));
+      CLUSTERD_LOG(CLUSTERD_CRIT, "Transport message: %s", raft.io->errmsg);
       return 1;
     }
   }
