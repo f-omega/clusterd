@@ -96,7 +96,10 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
     if ( (hostsep + 1) >= ctlend ) {
       sprintf(service, "clusterd");
       hostsep = ctlend;
-    } else if ( hostsep[1] != ':' ) {
+    } else
+      hostsep++;
+
+    if ( *hostsep != ':' ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Junk at end of IPv6 address");
       errno = EAFNOSUPPORT;
       return -1;
