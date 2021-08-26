@@ -63,7 +63,7 @@ static int random_controller_ix(const char *controller, int *countout) {
 static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
                               const char *controller, int ix) {
   int i, cur, err, ctllen = strlen(controller), addrcnt;
-  const char *ctlend, *hostsep;
+  const char *ctlend, *hostsep, *hostend;
 
   char service[10], host[HOST_NAME_MAX + 1];
 
@@ -86,18 +86,21 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
 
   if ( controller[i] == '[' ) {
     // IPv6 addr
-    hostsep = memchr(controller + i, ']', ctlend - (controller + i));
-    if ( !hostsep ) {
+    hostend = memchr(controller + i, ']', ctlend - (controller + i));
+    if ( !hostend ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "CLUSTERD_CONTROLLER has unterminated IPv6 address");
       errno = ESRCH;
       return -1;
     }
 
-    if ( (hostsep + 1) >= ctlend ) {
+    i++;
+
+    if ( (hostend + 1) >= ctlend ) {
       sprintf(service, "clusterd");
       hostsep = ctlend;
-    } else
-      hostsep++;
+    } else {
+      hostsep = hostend + 1;
+    }
 
     if ( *hostsep != ':' ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Junk at end of IPv6 address");
@@ -110,6 +113,8 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
       sprintf(service, "clusterd");
       hostsep = ctlend;
     }
+
+    hostend = hostsep;
   }
 
   if ( (ctlend - hostsep - 1) >= sizeof(service) ) {
@@ -126,7 +131,7 @@ static int resolve_controller(struct sockaddr_storage *ss, socklen_t *addrlen,
     return -1;
   } else {
     memset(host, 0, sizeof(host));
-    memcpy(host, controller + i, hostsep - (controller + i));
+    memcpy(host, controller + i, hostend - (controller + i));
   }
 
   // Set up hints
