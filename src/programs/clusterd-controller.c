@@ -1859,6 +1859,7 @@ int main(int argc, char *const *argv) {
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not start raft service: %s", raft_errmsg(&raft));
     CLUSTERD_LOG(CLUSTERD_CRIT, "Returned error: %s", raft_strerror(err));
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Transport message: %s", raft.io->errmsg);
     return 1;
   }
 
