@@ -1523,7 +1523,7 @@ function clusterd.get_signal_queue(ns, pid)
   assert(ns ~= nil, 'namespace must be provided to send signal')
   assert(pid ~= nil, 'process must be provided to send signal')
 
-  ps = clusterd.resolve_process(ns, pid)
+  ps = clusterd.get_process(ns, pid)
   if ps == nil then
     error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' not found')
   end
@@ -1551,7 +1551,7 @@ function clusterd.mark_signal(ns, pid, sigord)
   assert(pid ~= nil, 'process must be provided to mark signals')
   assert(sigord ~= nil and type(sigord) == 'number', 'signal ordinal must be a number')
 
-  ps = clusterd.resolve_process(ns, pid)
+  ps = clusterd.get_process(ns, pid)
   if ps == nil then
     error('process ' .. tostring(pid) .. ' not found in namespace ' .. tostring(ns))
   end
@@ -1575,7 +1575,7 @@ function clusterd.next_signal(ns, pid)
   assert(ns ~= nil, 'namespace must be provided to get signal')
   assert(pid ~= nil, 'process must be provided to get signal')
 
-  ps = clusterd.resolve_process(ns, pid)
+  ps = clusterd.get_process(ns, pid)
   if ps == nil then
     error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' not found')
   end
