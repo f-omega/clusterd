@@ -1108,6 +1108,7 @@ static void process_failure(pid_t *ps, int sts, sigset_t *oldmask) {
 
   if ( g_state == PROCESS_FAILURE ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Finish script exited abnormally");
+
     exit(101); // TODO
   }
 

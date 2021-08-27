@@ -1440,7 +1440,7 @@ function clusterd.send_signal(ns, pid, signal)
   assert(pid ~= nil, 'process must be provided to send signal')
   assert(signal ~= nil and type(signal) == "string", 'signal spec must be a string')
 
-  ps = clusterd.resolve_process(ns, pid)
+  ps = clusterd.get_process(ns, pid)
   if ps == nil then
     error('process ' .. tostring(pid) .. ' in namespace ' .. tostring(ns) .. ' does not exist')
   end
