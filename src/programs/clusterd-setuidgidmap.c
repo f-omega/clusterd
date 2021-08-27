@@ -113,6 +113,11 @@ static int set_mappings(const char *pidstr) {
   if ( err < 0 )
     return -1;
 
+  // TODO
+  err = write_map(gid_map, &gid_offs, 1000, 1000000, 100);
+  if ( err < 0 )
+    return -1;
+
   err = write_map(uid_map, &uid_offs, 0, procstat.st_uid, 1);
   if ( err < 0 )
     return -1;
