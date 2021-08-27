@@ -923,8 +923,11 @@ static int client_read_command(controller_client *client) {
 
         lua_pushstring(client->thread, client->command_buf);
         lua_pushvalue(client->thread, -1);
+
+        // stack is now param name, param name
         lua_gettable(client->thread, -3);
 
+        // stack is now param table, param name, old value
         // Top of stack is now old value of param
         if ( lua_isnil(client->thread, -1) ) {
           lua_pop(client->thread, 1);
@@ -934,25 +937,30 @@ static int client_read_command(controller_client *client) {
         } else if ( lua_istable(client->thread, -1) ) {
           int next_index;
 
-          // Stack is param table, key, table
+          // Stack is param table, param name, key, table
 
           // An array
           lua_len(client->thread, -1);
           next_index = lua_tonumber(client->thread, -1) + 1;
           lua_pop(client->thread, 1); // Pop the length
 
+          // Stack is now param table, param name, key, table
           lua_rotate(client->thread, -2, 1);
 
-          // Stack is now param table, table, key
+          // Stack is now param table, param name, table, key
           lua_pop(client->thread, 1);
 
-          // Stack is now param table, table
+          // Stack is now param table, param name, table
           lua_pushstring(client->thread, eq + 1);
+          // Stack is now param table, param name, table, value
           lua_seti(client->thread, -2, next_index);
+
+          // Stack is now param table, param name, table(new value) again
 
           lua_pop(client->thread, 1);
 
           // Stack is now param table
+          lua_settable(client->thread, -3);
         } else {
           // Stack is now param table, key, old value
           lua_newtable(client->thread);
