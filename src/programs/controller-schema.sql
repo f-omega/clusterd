@@ -193,6 +193,10 @@ CREATE TABLE IF NOT EXISTS global_resource_claim
       FOREIGN KEY (grc_ns, grc_process)
       REFERENCES process(ps_ns, ps_id)
       ON DELETE CASCADE
+  , CONSTRAINT gra_resource_fk
+      FOREIGN KEY (grc_ns, grc_resource)
+      REFERENCES global_resource(gr_ns, gr_name)
+      ON DELETE CASCADE
   );
 
 -- An endpoint is a static IP that gets resolved by the default

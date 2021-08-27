@@ -866,6 +866,20 @@ function clusterd.list_global_resources(options)
       table.insert(conditions, "gr_ns=$namespace")
    end
 
+   if options.type ~= nil then
+     assert(type(options.type) == "string", "type specification must be a string")
+     table.insert(conditions, "gr_type=$type")
+   end
+
+   if options.available ~= nil then
+     assert(type(options.available) == "boolean", "options.available must be a boolean")
+     if options.available then
+       table.insert(conditions, "gr_available")
+     else
+       table.insert(conditions, "NOT gr_available")
+     end
+   end
+
    if #conditions > 0 then
       condition = [[ WHERE ]] .. table.concat(conditions, " AND ")
    else
@@ -876,6 +890,28 @@ function clusterd.list_global_resources(options)
                       [[ FROM global_resource]] .. condition, options)
    if err ~= nil then
       error('could not list resources: ' .. err)
+   end
+
+   for _, r in ipairs(res) do
+     status, meta = pcall(function() return json.decode(r.metadata) end)
+     if status then
+       r.metadata = meta
+     else
+       r.bad_metadata = r.metadata
+       r.metadata = {}
+     end
+
+     if options.lookup_claims then
+       res, err = api.run([[SELECT grc_process AS process
+                            FROM global_resource_claim
+                            WHERE grc_ns=$ns AND grc_resource=$res]],
+                            { ns = options.namespace, res = r.name })
+       if err ~= nil then
+         error('Could not lookup claims for ' .. r.name .. ': ' .. err)
+       end
+
+       r.claims = res
+     end
    end
 
    return res
