@@ -938,7 +938,7 @@ static int client_read_command(controller_client *client) {
 
           // An array
           lua_len(client->thread, -1);
-          next_index = lua_tonumber(client->thread, -1);
+          next_index = lua_tonumber(client->thread, -1) + 1;
           lua_pop(client->thread, 1); // Pop the length
 
           lua_rotate(client->thread, -2, 1);
