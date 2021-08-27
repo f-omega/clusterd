@@ -1289,7 +1289,6 @@ int clusterd_enqueue_signal(clusterd_namespace_t ns, clusterd_pid_t ps, int sigs
 
   tgt.ns = ns;
   tgt.ps = ps;
-  memcpy(&tgt.monitor, node, sizeof(tgt.monitor));
 
   if ( node->ss_family == AF_INET ) {
     struct sockaddr_in *sin = (struct sockaddr_in *) node;
@@ -1303,6 +1302,8 @@ int clusterd_enqueue_signal(clusterd_namespace_t ns, clusterd_pid_t ps, int sigs
     errno = EAFNOSUPPORT;
     return -1;
   }
+
+  memcpy(&tgt.monitor, node, sizeof(tgt.monitor));
 
   HASH_FIND(hh, g_service->pending_signals, &tgt, sizeof(tgt), psig);
   if ( psig ) {
