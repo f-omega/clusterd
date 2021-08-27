@@ -764,13 +764,11 @@ int clusterctl_simple(clusterctl *c, clusterctl_tx_level lvl, const char *script
   return err;
 }
 
-int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
-                       const char *script, va_list args) {
+int clusterctl_start_script(clusterctl *c, clusterctl_tx_level lvl,
+                            const char *script) {
   char sha256str[SHA256_STR_LENGTH + 1];
   unsigned char sha256[SHA256_OCTET_LENGTH];
-  size_t scriptlen, paramlen;
-  const char *param_name;
-  char param_line[64 * 1024];
+  size_t scriptlen;
   int err;
 
   memset(sha256str, 0, sizeof(sha256str));
@@ -796,7 +794,19 @@ int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
     if ( err < 0 ) goto upload_error;
   }
 
-  // Add parameters
+  return 0;
+
+ upload_error:
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not upload script: %s", strerror(errno));
+  return -1;
+}
+
+int clusterctl_send_paramsv(clusterctl *c, va_list args) {
+  size_t  paramlen;
+  const char *param_name;
+  char param_line[64 * 1024];
+  int err;
+
   while ( (param_name = va_arg(args, const char *)) ) {
     const char *param_value;
 
@@ -818,6 +828,34 @@ int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
     }
   }
 
+  return 0;
+}
+
+int clusterctl_send_params(clusterctl *c, ...) {
+  va_list args;
+  int err;
+
+  va_start(args, c);
+
+  err = clusterctl_send_paramsv(c, args);
+
+  va_end(args);
+
+  return err;
+}
+
+int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
+                       const char *script, va_list args) {
+  int err;
+
+  err = clusterctl_start_script(c, lvl, script);
+  if ( err < 0 ) return err;
+
+  // Add parameters
+  err = clusterctl_send_paramsv(c, args);
+  if ( err < 0 )
+    return err;
+
   err = clusterctl_invoke(c);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not invoke command: %s", strerror(errno));
@@ -825,10 +863,6 @@ int clusterctl_simplev(clusterctl *c, clusterctl_tx_level lvl,
   }
 
   return 0;
-
- upload_error:
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not upload script: %s", strerror(errno));
-  return -1;
 }
 
 int clusterctl_flush_output(clusterctl *c, int out_fd, int err_fd, int *was_success) {
@@ -887,8 +921,6 @@ int clusterctl_flush_output(clusterctl *c, int out_fd, int err_fd, int *was_succ
 int clusterctl_call_simple(clusterctl *c, clusterctl_tx_level lvl,
                            const char *lua, char *output, size_t outputsz,
                            ...) {
-  char linebuf[64 * 1024];
-  size_t linesz;
   va_list args;
   int err, attempts = 0;
 
@@ -905,6 +937,23 @@ int clusterctl_call_simple(clusterctl *c, clusterctl_tx_level lvl,
   va_start(args, outputsz);
   err = clusterctl_simplev(c, lvl, lua, args);
   va_end(args);
+
+  err = clusterctl_read_all_output(c, output, outputsz);
+  if ( err == CLUSTERCTL_READ_TXFAILED ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Script failed because the controller we were talking to lost leadership: %s",
+                 lua);
+
+    attempts++;
+    goto tryagain;
+  }
+
+  return err;
+}
+
+int clusterctl_read_all_output(clusterctl *c, char *output, size_t outputsz) {
+  char linebuf[64 * 1024];
+  size_t linesz;
+  int err;
 
   // Now attempt to read the output
   for ( linesz = sizeof(linebuf), err = clusterctl_read_output(c, linebuf, &linesz);
@@ -928,12 +977,8 @@ int clusterctl_call_simple(clusterctl *c, clusterctl_tx_level lvl,
     return 0;
 
   case CLUSTERCTL_READ_TXFAILED:
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Script failed because the controller we were talking to lost leadership: %s",
-                 lua);
-
     // Retry
-    attempts ++;
-    goto tryagain;
+    return CLUSTERCTL_READ_TXFAILED;
 
   case CLUSTERCTL_READ_ERROR:
     if ( outputsz > 0 ) output[0] = '\0';

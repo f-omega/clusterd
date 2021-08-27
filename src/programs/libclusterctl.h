@@ -100,6 +100,21 @@ int clusterctl_pipe_script(clusterctl *c, int fd);
 int clusterctl_upload_script(clusterctl *c, const char *script, ssize_t scriptlen);
 
 /**
+ * Invoke a named script or re-use it. Calculates the SHA256 hash automatically
+ */
+int clusterctl_start_script(clusterctl *c, clusterctl_tx_level lvl, const char *script);
+
+/**
+ * Read all output into buffer (or to nowhere, if null). Send error to stderr
+ */
+int clusterctl_read_all_output(clusterctl *c, char *output, size_t outputsz);
+
+/**
+ * Upload parameters specified as arguments
+ */
+int clusterctl_send_params(clusterctl *c, ...);
+
+/**
  * Upload a newline delimited set of parameters. No checks are
  * performed to ensure the parameters are correctly formed.
  *

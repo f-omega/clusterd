@@ -32,6 +32,7 @@
 #include <time.h>
 #include <libgen.h>
 #include <dirent.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <locale.h>
@@ -138,7 +139,7 @@ static const char *lookup_ns_lua =
 static const char *update_proc_state_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
-  "clusterd.update_process(nsid, pid, { state = params.state })\n";
+  "clusterd.update_process(nsid, pid, { state = params.state, sigmask = params.sigmask })\n";
 
 static const char *remove_process_lua =
   "nsid = tonumber(params.namespace)\n"
@@ -2059,6 +2060,50 @@ static int remove_process() {
   return -1;
 }
 
+static int upload_sigmask(clusterctl *c) {
+  char sigmaskpath[PATH_MAX];
+  FILE *sigmaskf;
+  int err;
+
+  err = snprintf(sigmaskpath, sizeof(sigmaskpath), "%s/image/sigmask",
+                 g_ps_path);
+  if ( err >= sizeof(sigmaskpath) ) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  sigmaskf = fopen(sigmaskpath, "rt");
+  if ( !sigmaskf && errno == ENOENT ) {
+    return 0;
+  } else if ( !sigmaskf ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Sigmask available, but can't read it: %s", strerror(errno));
+    return -1;
+  } else {
+    char sigspec[2048];
+
+    while ( fgets(sigspec, sizeof(sigspec), sigmaskf) ) {
+      ssize_t sigend = strlen(sigspec);
+
+      if ( sigend == 0 ) continue;
+      if ( sigspec[0] == '#' ) continue;
+
+      for ( sigend = sigend - 1; sigend >= 0; sigend-- ) {
+        if ( !isspace(sigspec[sigend]) ) break;
+        else sigspec[sigend] = 0;
+      }
+
+      err = clusterctl_send_params(c, "sigmask", sigspec, NULL);
+      if ( err < 0 ) {
+        CLUSTERD_LOG(CLUSTERD_CRIT, "Could not upload sigmask");
+        fclose(sigmaskf);
+        return err;
+      }
+    }
+
+    return 0;
+  }
+}
+
 static int set_process_state(const char *state, ps_state new_recorded_state) {
   clusterctl ctl;
   int err;
@@ -2083,15 +2128,35 @@ static int set_process_state(const char *state, ps_state new_recorded_state) {
     return -1;
   }
 
-  err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
-                               update_proc_state_lua,
-                               NULL, 0,
+  // If we're starting up, then also set the sigmask
+  err = clusterctl_start_script(&ctl, CLUSTERCTL_MAY_WRITE,
+                                update_proc_state_lua);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not update proc state: %s", strerror(errno));
+    goto error;
+  }
+
+  err = clusterctl_send_params(&ctl,
                                "namespace", nsid_str,
                                "pid", pid_str,
                                "state", state,
                                NULL);
   if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not set process state: %s", strerror(errno));
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not send parameters to update proc state: %s", strerror(errno));
+    goto error;
+  }
+
+  if ( new_recorded_state == PROCESS_STARTED ) {
+    err = upload_sigmask(&ctl);
+    if ( err < 0 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not send sigmask");
+      goto error;
+    }
+  }
+
+  err = clusterctl_read_all_output(&ctl, NULL, 0);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get output: %s", strerror(errno));
     goto error;
   }
 
