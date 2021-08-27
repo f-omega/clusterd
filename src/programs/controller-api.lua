@@ -1508,7 +1508,7 @@ function clusterd.send_signal(ns, pid, signal)
   -- need to be contacted to deliver the signal.
   if ps.ps_placement ~= nil then
     node = clusterd.get_node(ps.ps_placement)
-    if node ~= nil then
+    if node == nil then
       error('process ' .. tostring(ps.ps_id) .. ' in namespace ' .. tostring(ps.ps_ns) ..
             ' has an invalid placement: ' .. ps.ps_placement)
     end
