@@ -1384,7 +1384,7 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
 
   memcpy(&req, buf->base, sizeof(req));
 
-  if ( ntohs(req.length) >= nread ||
+  if ( ntohs(req.length) > nread ||
        buf->len < nread ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram cut short (Request length is %u, read is %zd, buf len is %zu)",
                  ntohs(req.length), nread, buf->len);

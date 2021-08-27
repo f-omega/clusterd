@@ -1704,6 +1704,8 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
     if ( atype == CLUSTERD_ATTR_SIGORDINAL ) {
       void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);
 
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Parse sig ordinal");
+
       if ( alen != sizeof(sigordinal) ) {
         CLUSTERD_LOG(CLUSTERD_DEBUG, "Heartbeat ack sig ordinal too large. Ignoring");
         continue;
@@ -1712,6 +1714,7 @@ static void process_monitor_hb_ack(monitor *m, sigset_t *oldmask, char *reqbuf, 
       if ( adata ) {
         memcpy(&sigordinal, adata, sizeof(sigordinal));
         sigordinal = ntohl(sigordinal);
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Sig ordinal is %u", sigordinal);
       }
     } else if ( atype == CLUSTERD_ATTR_COOKIE ) {
       void *adata = CLUSTERD_ATTR_DATA(attr, reqbuf, &req);

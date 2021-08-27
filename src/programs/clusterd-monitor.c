@@ -590,6 +590,7 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
   // Send ACK request
   CLUSTERD_INIT_REQ(rspbuf, off, sizeof(rspbuf), CLUSTERD_OP_MONITOR_ACK);
   if ( last_sigordinal != 0 ) {
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Include sigordinal in monitor hb ack");
     uint32_t netsigord = htonl(last_sigordinal);
     CLUSTERD_ADD_ATTR(rspbuf, off, attroff, CLUSTERD_ATTR_SIGORDINAL);
     CLUSTERD_WRITE_ATTR(rspbuf, off, &netsigord, sizeof(netsigord));
