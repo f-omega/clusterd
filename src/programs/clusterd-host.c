@@ -500,11 +500,11 @@ static int discard_logs() {
   return 0;
 }
 
-static int open_service_logs() {
+static int open_service_logs(int wants_logs) {
   char log_path[PATH_MAX];
   int err;
 
-  // If the logging service exists, then we create a pipe, otherwise set g_service_out to dev nul
+  // If the logging service exists, then we create a pipe, otherwise set g_service_out to /dev/null, unless we're in debug mode
   err = snprintf(log_path, sizeof(log_path), "%s/image/log/run", clusterd_get_runtime_dir());
   if ( err >= sizeof(log_path) ) {
     errno = ENAMETOOLONG;
@@ -518,7 +518,11 @@ static int open_service_logs() {
   } else if ( err < 0 && errno == ENOENT ) {
     // Log script not found, open /dev/null
 
-    g_service_out = open("/dev/null", O_WRONLY);
+    if ( wants_logs )
+      g_service_out = dup(g_hostlog_fd);
+    else
+      g_service_out = open("/dev/null", O_WRONLY);
+
     if ( g_service_out < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open /dev/null for service output");
       return -1;
@@ -2361,7 +2365,7 @@ int main(int argc, char *const *argv) {
   }
 
   if ( !interactive ) {
-    err = open_service_logs();
+    err = open_service_logs(wants_logs);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "");
       fclose(g_urandom);
