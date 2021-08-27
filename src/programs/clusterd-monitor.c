@@ -575,9 +575,10 @@ static void process_monitor_request(uv_udp_t *handle, const struct sockaddr *add
 
     last_sigordinal = sigordinal;
   } else {
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u already exists. Touching...",
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Process key %u:%u already exists. Touching... (sig ord is %d)",
                  (unsigned)key.namespace,
-                 (unsigned)key.process);
+                 (unsigned)key.process,
+                 existing->sigordinal);
     err = touch_process(existing, addr, interval, sigordinal, monitors, mon_count);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not touch process");
