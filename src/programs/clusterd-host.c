@@ -2154,6 +2154,12 @@ static int set_process_state(const char *state, ps_state new_recorded_state) {
     }
   }
 
+  err = clusterctl_invoke(&ctl);
+  if ( err < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not invoke: %s", strerror(errno));
+    goto error;
+  }
+
   err = clusterctl_read_all_output(&ctl, NULL, 0);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not get output: %s", strerror(errno));
