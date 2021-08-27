@@ -1375,10 +1375,7 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
     CLUSTERD_LOG(CLUSTERD_ERROR, "Error receiving psig confirmation");
   }
 
-  if ( nread <= 0 ) {
-    process_psig_confirmations();
-    return;
-  }
+  if ( nread == 0 ) return; // No more data left
 
   if ( buf->len < sizeof(req) ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram too short");
@@ -1389,7 +1386,8 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
 
   if ( ntohs(req.length) >= nread ||
        buf->len < nread ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram cut short");
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram cut short (Request length is %u, read is %zd, buf len is %zu)",
+                 ntohs(req.length), nread, buf->len);
     goto again;
   }
 
@@ -1463,7 +1461,6 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
   }
 
  again:
-  process_psig_confirmations();
   return;
 }
 
