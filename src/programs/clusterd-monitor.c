@@ -203,7 +203,6 @@ static int touch_process(process_record *process, const struct sockaddr *addr, u
   process->error_count = 0;
   process->success_count ++;
 
-  process->sigordinal = 0;
   if ( sigordinal > process->sigordinal )
     process->sigordinal = sigordinal;
 
