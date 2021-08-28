@@ -1289,6 +1289,9 @@ int clusterd_enqueue_signal(clusterd_namespace_t ns, clusterd_pid_t ps, int last
   pending_signal *psig;
   int err;
 
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Enqueueing signal for " NS_F ":" PID_F ": Last sig ord is %d",
+               ns, ps, lastsigord);
+
   tgt.ns = ns;
   tgt.ps = ps;
 
