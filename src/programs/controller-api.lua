@@ -1515,7 +1515,7 @@ function clusterd.get_signal_queue(ns, pid)
 
   res, err = api.run(
     [[SELECT COALESCE(MAX(enqsig_pos), 0) AS latest_signal,
-             COALESCE(MAX(CASE WHEN enqsig_flagged THEN enqsig_pos ELSE 0), 0) AS last_signal
+             COALESCE(MAX(CASE WHEN enqsig_flagged THEN enqsig_pos ELSE 0 END), 0) AS last_signal
       FROM enqueued_signal
       WHERE enqsig_ns = $ns AND enqsig_ps = $ps]],
     { ns = ps.ps_ns, ps = ps.ps_id }
