@@ -1425,6 +1425,22 @@ static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask)
 
   struct stat sigexest;
 
+  err = snprintf(nsstr, sizeof(nsstr), NS_F, g_nsid);
+  if ( err >= sizeof(nsstr) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Overflow while writing namespace id");
+
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  err = snprintf(psstr, sizeof(psstr), PID_F, g_pid);
+  if ( err >= sizeof(psstr) ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "overflow while writing process ID");
+
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
   err = clusterctl_open(&ctl);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl: %s", strerror(errno));
