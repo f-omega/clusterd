@@ -152,7 +152,10 @@ static const char *mark_all_signals_lua =
   "  error('could not get signal queue for process')\n"
   "end\n"
   "if q.latest_signal ~= nil then\n"
-  "  clusterd.mark_signal(params.namespace, params.process, q.latest_signal)\n"
+  "  res = clusterd.mark_signal(params.namespace, params.process, q.latest_signal)\n"
+  "  clusterd.output(tostring(q.latest_signal))\n"
+  "else\n"
+  "  clusterd.output(\"0\")\n"
   "end\n";
 
 static const char *get_next_signal_lua =
@@ -1466,6 +1469,12 @@ static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask)
       CLUSTERD_LOG(CLUSTERD_WARNING, "Could not mark all signals read: %s", strerror(errno));
       ret = -1;
       goto done;
+    }
+
+    err = sscanf(nextsigbuf, "%u", last_delivered);
+    if ( err != 1 ) {
+      CLUSTERD_LOG(CLUSTERD_ERROR, "Bad return value from mark all signals script");
+      ret = -1;
     }
 
     goto done;
