@@ -73,7 +73,7 @@ set -o pipefail
 
 if [ -z ${NODE_ADDRESS+x} ]; then
     set +e
-    for a in $(getent ahosts example.com | awk '{print $1}'); do
+    for a in $(getent ahosts $(hostname) | awk '{print $1}'); do
 
         ADDR=$(ip route get $a | awk '{print $7}')
         if [ $? -eq 0 ]; then

@@ -1186,7 +1186,7 @@ static void deliver_pending_signal(pending_signal *psig) {
 
   err = uv_udp_try_send(&g_service->udp, &psig_msg, 1,
                         (struct sockaddr *)&psig->target.monitor);
-  if ( err != 0 ) {
+  if ( err < 0 ) {
     if ( err == -UV_EAGAIN ) {
       int jitter = (random() % PENDING_SIGNAL_JITTER) - (PENDING_SIGNAL_JITTER/2);
 
@@ -1208,7 +1208,7 @@ static void deliver_pending_signal(pending_signal *psig) {
   }
 
   // Also reset the timeout based on the number of retransmits
-      err = uv_timer_start(&psig->rto, psig_rto_timeout, PENDING_SIGNAL_RETRANSMIT_BASE * (1 << psig->retransmits), 0);
+  err = uv_timer_start(&psig->rto, psig_rto_timeout, PENDING_SIGNAL_RETRANSMIT_BASE * (1 << psig->retransmits), 0);
   if ( err != 0 ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not set timeout for pending signal for process " PID_F "(ns=" NS_F "): %s",
                  psig->target.ps, psig->target.ns, uv_strerror(err));
