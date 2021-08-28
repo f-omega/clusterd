@@ -1489,21 +1489,6 @@ function clusterd.send_signal(ns, pid, signal)
     error('could not enqueue signal: ' .. err)
   end
 
-  res, err = api.run(
-    [[SELECT COUNT(*) AS pending FROM enqueued_signal
-      WHERE enqsig_ns=$ns AND enqsig_ps=$ps AND NOT enqsig_flagged]],
-    { ns = ps.ps_ns, ps = ps.ps_id }
-  )
-  if err ~= nil then
-    error('could not count pending signals: ' .. err)
-  end
-
-  if #res ~= 1 then
-    error('too many results returned when counting pending signals')
-  end
-
-  sigswaiting = res[1].pending
-
   -- Now we need to signal to the process that this process's monitors
   -- need to be contacted to deliver the signal.
   if ps.ps_placement ~= nil then
@@ -1513,7 +1498,7 @@ function clusterd.send_signal(ns, pid, signal)
             ' has an invalid placement: ' .. ps.ps_placement)
     end
 
-    api.queue_signal_notification(ps.ps_ns, ps.ps_id, sigswaiting, node.ip)
+    api.queue_signal_notification(ps.ps_ns, ps.ps_id, next_signal_pos, node.ip)
   end
 
   return true

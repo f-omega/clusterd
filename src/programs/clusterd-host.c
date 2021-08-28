@@ -1615,11 +1615,17 @@ static void handle_sigdelivery_exit(sigset_t *oldmask) {
       else if ( WCOREDUMP(sts) )
         CLUSTERD_LOG(CLUSTERD_WARNING, "Signal delivery process exited due to core dump");
 
+      if ( WIFEXITED(sts) && WEXITSTATUS(sts) == 0 ) {
+        // If the process was unsuccessful, this will just cause an
+        // infinite loop. Just wait until the next monitor request and
+        // restart.
+
+        // If there are newer signals than reported, trigger a new signal delivery
+        trigger_signal_delivery(oldmask);
+      }
+
       g_sigdelivery_pid = -1;
     }
-
-    // If there are newer signals than reported, trigger a new signal delivery
-    trigger_signal_delivery(oldmask);
   }
 }
 

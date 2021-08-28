@@ -769,7 +769,7 @@ static int clusterd_lua_is_valid_ip(lua_State *lua) {
 }
 
 static int clusterd_lua_queue_signal_notification(lua_State *lua) {
-  int nargs, sigswaiting, err;
+  int nargs, lastsigord, err;
   clusterd_namespace_t nsid;
   clusterd_pid_t psid;
   const char *nip;
@@ -781,7 +781,7 @@ static int clusterd_lua_queue_signal_notification(lua_State *lua) {
 
   nsid = lua_tointeger(lua, 1);
   psid = lua_tointeger(lua, 2);
-  sigswaiting = lua_tointeger(lua, 3);
+  lastsigord = lua_tointeger(lua, 3);
   nip = lua_tostring(lua, 4);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Scheduling notification for process " PID_F "(ns=" NS_F "): %s",
@@ -792,7 +792,7 @@ static int clusterd_lua_queue_signal_notification(lua_State *lua) {
   if ( err != 0 )
     return luaL_error(lua, "api.queue_signal_notification: node ip %s is invalid", nip);
 
-  err = clusterd_enqueue_signal(nsid, psid, sigswaiting, &naddr);
+  err = clusterd_enqueue_signal(nsid, psid, lastsigord, &naddr);
   if ( err < 0 )
     return luaL_error(lua, "api.queue_signal_notification: internal error");
 }
