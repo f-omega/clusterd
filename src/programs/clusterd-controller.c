@@ -1369,16 +1369,16 @@ static void parse_psig_confirmation(uv_udp_t *udp, ssize_t nread, const uv_buf_t
 
   pending_signal *psig;
 
-  if ( clusterd_addr_normalize(&saddr, addr) < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Received garbage address from libuv");
-    goto again;
-  }
-
   if ( nread < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Error receiving psig confirmation");
   }
 
   if ( nread == 0 ) return; // No more data left
+
+  if ( clusterd_addr_normalize(&saddr, addr) < 0 ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Received garbage address from libuv");
+    goto again;
+  }
 
   if ( buf->len < sizeof(req) ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Datagram too short");
