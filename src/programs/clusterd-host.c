@@ -1447,14 +1447,6 @@ static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask)
     return -1;
   }
 
-  err = snprintf(sigordinalstr, sizeof(sigordinalstr), "%u", *last_delivered);
-  if ( err >= sizeof(sigordinalstr) ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "overflow while writing sig ordinal");
-
-    errno = ENAMETOOLONG;
-    return -1;
-  }
-
   err = clusterctl_open(&ctl);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl: %s", strerror(errno));
@@ -1498,6 +1490,15 @@ static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask)
     json_int_t next_sigordinal;
 
     const char *sigtype;
+
+    err = snprintf(sigordinalstr, sizeof(sigordinalstr), "%u", *last_delivered);
+    if ( err >= sizeof(sigordinalstr) ) {
+      CLUSTERD_LOG(CLUSTERD_CRIT, "overflow while writing sig ordinal");
+
+      errno = ENAMETOOLONG;
+      ret = -1;
+      goto done;
+    }
 
     err = clusterctl_call_simple(&ctl, CLUSTERCTL_MAY_WRITE,
                                  get_next_signal_lua,
