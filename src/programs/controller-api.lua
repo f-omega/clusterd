@@ -1581,7 +1581,7 @@ function clusterd.next_signal(ns, pid)
       WHERE  enqsig_ns = $ns
         AND  enqsig_ps = $ps
         AND NOT enqsig_flagged
-      ORDER BY enqsig_pos ASCENDING
+      ORDER BY enqsig_pos ASC
       LIMIT 1]],
     { ns = ps.ps_ns, ps = ps.ps_id }
   )
