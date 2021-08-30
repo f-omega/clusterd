@@ -1530,7 +1530,7 @@ static int deliver_clusterd_signals(uint32_t *last_delivered, sigset_t *oldmask)
     // current signal, and the last one
     err = json_unpack_ex(sig, &jserr, 0, "{sIss}",
                          "sigordinal", &next_sigordinal,
-                         "type", &sigtype);
+                         "signal", &sigtype);
     if ( err < 0 ) {
       CLUSTERD_LOG(CLUSTERD_CRIT, "Could not unpack signal information: %s. In info: %s", jserr.text, nextsigbuf);
       ret = -1;

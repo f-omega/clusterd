@@ -1576,7 +1576,8 @@ function clusterd.next_signal(ns, pid)
   end
 
   res, err = api.run(
-    [[SELECT enqsig_signal AS signal
+    [[SELECT enqsig_signal AS signal,
+             enqsig_pos AS sigordinal
       FROM   enqueued_signal
       WHERE  enqsig_ns = $ns
         AND  enqsig_ps = $ps
