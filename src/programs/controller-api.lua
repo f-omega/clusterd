@@ -1525,10 +1525,20 @@ function clusterd.get_signal_queue(ns, pid)
   end
 
   if #res ~= 1 then
-   return { last_signal = 0, latest_signal = 0 }
+   r = { last_signal = 0, latest_signal = 0 }
   else
-   return res[1]
+   r = res[1]
   end
+
+  if r.last_signal == nil then
+    r.last_signal = 0
+  end
+
+  if r.latest_signal == nil then
+    r.latest_signal = 0
+  end
+
+  return r
 end
 
 function clusterd.mark_signal(ns, pid, sigord)
