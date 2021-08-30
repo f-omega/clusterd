@@ -139,6 +139,9 @@ static const char *lookup_ns_lua =
 static const char *update_proc_state_lua =
   "nsid = tonumber(params.namespace)\n"
   "pid = tonumber(params.pid)\n"
+  "if type(params.sigmask) ~= \"table\" then\n"
+  "  params.sigmask = { params.sigmask }\n"
+  "end\n"
   "clusterd.update_process(nsid, pid, { state = params.state, sigmask = params.sigmask })\n";
 
 static const char *remove_process_lua =
