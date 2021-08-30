@@ -1556,7 +1556,7 @@ function clusterd.mark_signal(ns, pid, sigord)
       SET enqsig_flagged=true
       WHERE enqsig_ns = $ns AND
             enqsig_ps = $ps AND
-            enqsig_pos < $ord]],
+            enqsig_pos <= $ord]],
      { ns = ps.ps_ns, ps = ps.ps_id,
        ord = sigord }
   )
