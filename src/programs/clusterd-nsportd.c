@@ -193,6 +193,7 @@ static int flush_tables(const char *tblname) {
                  "  type filter hook prerouting priority -100; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
+                 "  ip6 daddr %s:%04x:%04x::/96 accept;\n"
                  "  ip6 daddr %s::/64 counter queue num %d;\n"
                  "  ip6 daddr %s::/64 counter queue num %d;\n"
                  "}\n"
@@ -201,6 +202,7 @@ static int flush_tables(const char *tblname) {
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
                  CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
+                 CLUSTERD_ENDPOINT_PROCESS_ADDR, nshi, nslo,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
                  CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
