@@ -192,6 +192,7 @@ static int flush_tables(const char *tblname) {
                  "chain FORWARD{\n"
                  "  type filter hook prerouting priority -100; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
+                 "  ip6 daddr @clusterd-external accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 accept;\n"
                  "  ip6 daddr %s::/64 counter queue num %d;\n"
