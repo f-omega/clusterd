@@ -186,19 +186,23 @@ static int flush_tables(const char *tblname) {
                  "chain NAT {\n"
                  "  type nat hook prerouting priority 0; policy drop;\n"
                  "  ip6 daddr != @clusterd-endpoints ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
-                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 queue num %d;\n"
-                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 queue num %d;\n"
+                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 counter queue num %d;\n"
+                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 counter queue num %d;\n"
                  "}\n"
                  "chain FORWARD{\n"
                  "  type filter hook prerouting priority -100; policy accept;\n"
                  "  ip6 daddr @clusterd-endpoints accept;\n"
                  "  ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
+                 "  ip6 daddr %s::/64 counter queue num %d;\n"
+                 "  ip6 daddr %s::/64 counter queue num %d;\n"
                  "}\n"
                  "}\n", tblname,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
                  CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num,
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num);
+                 CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
+                 CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
+                 CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
 
   nft_run_cmd_from_buffer(nft, cmdbuf);
