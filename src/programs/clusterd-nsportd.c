@@ -182,9 +182,11 @@ static int flush_tables(const char *tblname) {
 
   err = snprintf(cmdbuf, sizeof(cmdbuf), "add table inet %s {\n"
                  "set clusterd-endpoints { type ipv6_addr; flags timeout; }\n"
+                 "set clusterd-external { type ipv6_addr; flags timeout; }\n"
                  "chain NAT {\n"
                  "  type nat hook prerouting priority 0; policy drop;\n"
                  "  ip6 daddr != @clusterd-endpoints ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
+                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 queue num %d;\n"
                  "}\n"
                  "chain FORWARD{\n"
                  "  type filter hook prerouting priority -100; policy accept;\n"
@@ -193,6 +195,7 @@ static int flush_tables(const char *tblname) {
                  "}\n"
                  "}\n", tblname,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
+                 CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
                  CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num);
   if ( err >= sizeof(cmdbuf) ) goto overflow;
 
@@ -843,7 +846,8 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 	CLUSTERD_LOG(CLUSTERD_DEBUG, "Unknown packet type");
 	break;
       }
-    }
+    } else
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got packet destined for external namespace");
   } else
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Packet received in unknown protocol %x", proto);
 
