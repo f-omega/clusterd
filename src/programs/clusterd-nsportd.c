@@ -182,7 +182,7 @@ static int flush_tables(const char *tblname) {
 
   err = snprintf(cmdbuf, sizeof(cmdbuf), "add table inet %s {\n"
                  "set clusterd-endpoints { type ipv6_addr; flags timeout; }\n"
-                 "set clusterd-external { type ipv6_addr; flags timeout; }\n"
+                 "set clusterd-external { type ipv6_addr; flags timeout, interval; }\n"
                  "chain NAT {\n"
                  "  type nat hook prerouting priority 0; policy drop;\n"
                  "  ip6 daddr != @clusterd-endpoints ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
@@ -783,6 +783,17 @@ static int send_verdict(uint32_t pkt_id, int verdict) {
   return 0;
 }
 
+static int extract_namespace(unsigned char *addr, clusterd_namespace_t *ns) {
+  uint32_t netns;
+
+  memcpy(&netns, addr + 8, sizeof(netns));
+
+  netns = ntohl(netns);
+  *ns = netns;
+
+  return 0;
+}
+
 static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 			  void *p, uint32_t plen) {
 
@@ -852,8 +863,22 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 	CLUSTERD_LOG(CLUSTERD_DEBUG, "Unknown packet type");
 	break;
       }
-    } else
-      CLUSTERD_LOG(CLUSTERD_DEBUG, "Got packet destined for external namespace");
+    } else {
+      clusterd_namespace_t ext;
+
+      err = extract_namespace(&hdr.daddr.s6_addr, &ext);
+      if ( err < 0 ) {
+        verdict = NF_DROP;
+      } else {
+        CLUSTERD_LOG(CLUSTERD_DEBUG, "Got packet destined for external namespace" NS_F, ext);
+      }
+
+      // Set up rule to accept these packets. At this point we should
+      // also call the external namespace program, if any, to set up
+      // routes.
+//      if ( g_external_ns_cmd ) {
+//      }
+    }
   } else
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Packet received in unknown protocol %x", proto);
 
