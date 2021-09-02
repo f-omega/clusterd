@@ -903,7 +903,7 @@ function clusterd.list_global_resources(options)
      end
 
    if options.lookup_claims then
-       claims, err = api.run([[SELECT grc_process AS process
+       claims, err = api.run([[SELECT grc_ns AS namespace, grc_process AS process
                               FROM global_resource_claim
                               WHERE grc_ns=$ns AND grc_resource=$res]],
                               { ns = r.ns, res = r.name })
