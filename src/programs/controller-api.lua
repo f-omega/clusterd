@@ -888,7 +888,6 @@ function clusterd.list_global_resources(options)
 
 
    query = ([[SELECT ]] .. global_resource_projection .. [[ FROM global_resource]] .. condition)
-   clusterd.output(query)
    res, err = api.run(query, options)
    if err ~= nil then
       error('could not list resources: ' .. err)
@@ -904,15 +903,15 @@ function clusterd.list_global_resources(options)
      end
 
      if options.lookup_claims then
-       res, err = api.run([[SELECT grc_process AS process
-                            FROM global_resource_claim
-                            WHERE grc_ns=$ns AND grc_resource=$res]],
-                            { ns = options.namespace, res = r.name })
+       claims, err = api.run([[SELECT grc_process AS process
+                              FROM global_resource_claim
+                              WHERE grc_ns=$ns AND grc_resource=$res]],
+                              { ns = options.namespace, res = r.name })
        if err ~= nil then
          error('Could not lookup claims for ' .. r.name .. ': ' .. err)
        end
 
-       r.claims = res
+       r.claims = claims
      end
    end
 
