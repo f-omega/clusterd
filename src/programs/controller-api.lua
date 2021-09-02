@@ -579,7 +579,7 @@ function clusterd.new_process(ns, imgpath, options)
 
    new_pid = res[1].ps_id + 1
    _, err = api.run(
-      [[INSERT INTO process(ps_id, ps_image, ps_ns, ps_state, ps_placement, ps_ip AS ip)
+      [[INSERT INTO process(ps_id, ps_image, ps_ns, ps_state, ps_placement)
         VALUES ($id, $img, $ns, $state, $placement)]],
       { id = new_pid, img = imgpath, ns = ns_id,
         state = state, placement = options.placement }
@@ -609,7 +609,7 @@ function clusterd.list_processes(ns, options)
    if options.resolve_names then
       res, err = api.run(
          [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement,
-                  ns.ns_label as ps_ns_name
+                  ns.ns_label as ps_ns_name, ps_ip AS ip
            FROM process
            JOIN namespace ns ON ns.ns_id = process.ps_ns
            WHERE process.ps_ns = $ns]],
@@ -617,7 +617,7 @@ function clusterd.list_processes(ns, options)
       )
    else
       res, err = api.run(
-         [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement
+         [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement, ps_ip AS ip
            FROM process
            WHERE process.ps_ns = $ns]],
          {ns = ns}
@@ -667,7 +667,7 @@ function clusterd.get_process(ns, pid)
    end
 
    res, err = api.run(
-      [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement
+      [[SELECT ps_id, ps_image, ps_ns, ps_state, ps_placement, ps_ip AS ip
         FROM process WHERE ps_id=$pid AND ps_ns=$ns]],
       { pid = psid, ns = nsid }
    )
