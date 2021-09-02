@@ -902,11 +902,11 @@ function clusterd.list_global_resources(options)
        r.metadata = {}
      end
 
-     if options.lookup_claims then
+   if options.lookup_claims then
        claims, err = api.run([[SELECT grc_process AS process
                               FROM global_resource_claim
                               WHERE grc_ns=$ns AND grc_resource=$res]],
-                              { ns = options.namespace, res = r.name })
+                              { ns = r.ns, res = r.name })
        if err ~= nil then
          error('Could not lookup claims for ' .. r.name .. ': ' .. err)
        end
