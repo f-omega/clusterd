@@ -766,7 +766,7 @@ function clusterd.update_process(ns, pid, options)
         [[UPDATE process
           SET    ps_ip=$ip
           WHERE ps_id=$pid AND ps_ns=$ns]],
-        { ip = opti.nsip, pid = process.ps_id, ns = process.ps_ns }
+        { ip = options.ip, pid = process.ps_id, ns = process.ps_ns }
      )
      if err ~= nil then
        error('could not update process ip: ' .. err)
