@@ -1246,7 +1246,7 @@ function clusterd.claim_resource(ns, name, pid)
       error('this resource is assigned to many nodes with different affinities')
    end
 
-   if proc.ps_placement ~= nodes[1].gra_node then
+   if #nodes == 1 and proc.ps_placement ~= nodes[1].gra_node then
       error('process ' .. proc.ps_id .. ' cannot claim this resource. ' ..
                'The resource requires processes to be on node ' .. nodes[1].gra_node .. ', ' ..
                'but the process is placed on ' .. proc.ps_placement)
