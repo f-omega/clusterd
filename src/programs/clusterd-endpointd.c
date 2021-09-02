@@ -20,7 +20,7 @@
  * SOFTWARE.
  */
 
-#define CLUSTERD_COMPONENT "clusterd-nsportd"
+#define CLUSTERD_COMPONENT "clusterd-endpointd"
 #include "clusterd/log.h"
 #include "clusterd/common.h"
 #include "libclusterctl.h"
@@ -63,14 +63,20 @@
 #define MAX_CLUSTERCTL_CONN_KEEPALIVE 30000 // Keep connections to clusterctl alive for 30 seconds at least
 #define RULE_TTL_SECONDS 300
 
-#define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 12
+// TODO proper ipv6 CIDR
+#define CLUSTERD_ENDPOINT_PREFIX_BYTELEN 8
 static uint8_t CLUSTERD_ENDPOINT_PREFIX[CLUSTERD_ENDPOINT_PREFIX_BYTELEN] =
-  { CLUSTERD_ENDPOINT_PREFIX_ADDR, 0x00, 0x00, 0x00, 0x00 };
+  { CLUSTERD_ENDPOINT_PREFIX_ADDR };
+
+struct ep_key {
+  clusterd_namespace_t ns_id;
+  clusterd_endpoint_t endpoint_id;
+};
 
 struct pending_packet {
   uint32_t pkt_id;
 
-  clusterd_endpoint_t endpoint_id;
+  struct ep_key endpoint;
   int proto;
   uint16_t port;
 
@@ -78,7 +84,7 @@ struct pending_packet {
 };
 
 struct mapped_endpoint {
-  clusterd_endpoint_t endpoint_id;
+  struct ep_key endpoint;
   struct timespec last_updated;
   int ttl, rule_handle;
 
@@ -96,9 +102,9 @@ static pthread_mutex_t g_packet_queue_mutex;
 static pthread_cond_t g_packet_queue_cond;
 static struct pending_packet *g_available_packets = NULL, *g_next_packet = NULL, *g_last_packet = NULL;;
 
-static clusterd_namespace_t g_nsid;
-
 static const char *g_table_name = "clusterd";
+static const char *g_endpoint_set_name = "clusterd-endpoints";
+static const char *g_namespace_set_name = "clusterd-namespaces";
 static const char *g_tcp_vmap_name = "nsports-tcp";
 static const char *g_udp_vmap_name = "nsports-udp";
 static int g_queue_num = -1;
@@ -116,9 +122,8 @@ struct mapped_endpoint *g_endpoints = NULL;
 static regex_t g_nft_handle_re;
 
 static int send_verdict(uint32_t pkt_id, int verdict);
-static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t port, int proto);
+static int enqueue_packet(uint32_t pktid, clusterd_namespace_t nsid, clusterd_endpoint_t epid, uint16_t port, int proto);
 static void free_packet(struct pending_packet *pkt);
-static int flush_tables(const char *tblname);
 static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_handle);
 
 // Basic operation... read packets from queue. a new packet means a
@@ -159,78 +164,20 @@ static int bind_queue(struct mnl_socket *nl) {
   return 0;
 }
 
-static int flush_tables(const char *tblname) {
-  char cmdbuf[16*1024];
-  struct nft_ctx *nft;
-  int ret = -1, err;
-  uint16_t nshi, nslo;
-
-  nshi = (uint16_t) ((g_nsid >> 16) & 0xFFFF);
-  nslo = (uint16_t) (g_nsid & 0xFFFF);
-
-  nft = nft_ctx_new(NFT_CTX_DEFAULT);
-  if ( !nft ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create nftables context: %s", strerror(errno));
-    return -1;
-  }
-
-  err = snprintf(cmdbuf, sizeof(cmdbuf), "delete table inet %s", tblname);
-  if ( err >= sizeof(cmdbuf) ) goto overflow;
-
-  // May or may not fail, doesn't matter
-  nft_run_cmd_from_buffer(nft, cmdbuf);
-
-  err = snprintf(cmdbuf, sizeof(cmdbuf), "add table inet %s {\n"
-                 "set clusterd-endpoints { type ipv6_addr; flags timeout; }\n"
-                 "set clusterd-external { type ipv6_addr; flags timeout, interval; }\n"
-                 "chain NAT {\n"
-                 "  type nat hook prerouting priority 0; policy drop;\n"
-                 "  ip6 daddr != @clusterd-endpoints ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
-                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 counter queue num %d;\n"
-                 "  ip6 daddr != @clusterd-external  ip6 daddr %s::/64 counter queue num %d;\n"
-                 "}\n"
-                 "chain FORWARD{\n"
-                 "  type filter hook prerouting priority -100; policy accept;\n"
-                 "  ip6 daddr @clusterd-endpoints accept;\n"
-                 "  ip6 daddr @clusterd-external accept;\n"
-                 "  ip6 daddr %s:%04x:%04x::/96 counter queue num %d;\n"
-                 "  ip6 daddr %s:%04x:%04x::/96 accept;\n"
-                 "  ip6 daddr %s::/64 counter queue num %d;\n"
-                 "  ip6 daddr %s::/64 counter queue num %d;\n"
-                 "}\n"
-                 "}\n", tblname,
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
-                 CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num,
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR, nshi, nslo, g_queue_num,
-                 CLUSTERD_ENDPOINT_PROCESS_ADDR, nshi, nslo,
-                 CLUSTERD_ENDPOINT_NETWORK_ADDR, g_queue_num,
-                 CLUSTERD_ENDPOINT_PROCESS_ADDR, g_queue_num);
-  if ( err >= sizeof(cmdbuf) ) goto overflow;
-
-  nft_run_cmd_from_buffer(nft, cmdbuf);
-
-  ret = 0;
- done:
-  nft_ctx_free(nft);
-  return ret;
-
- overflow:
-  CLUSTERD_LOG(CLUSTERD_CRIT, "Could not fill command buffer: %s", cmdbuf);
-  errno = ENOBUFS;
-  ret = -1;
-  goto done;
-}
-
-static int endpoint_exists(clusterd_endpoint_t epid) {
+static int endpoint_exists(clusterd_namespace_t nsid, clusterd_endpoint_t epid) {
   struct mapped_endpoint *ep = NULL;
+  struct ep_key endpoint;
+
+  memset(&endpoint, 0, sizeof(endpoint));
+  endpoint.ns_id = nsid;
+  endpoint.endpoint_id = epid;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not lookup endpoint " EP_F ": could not lock mutex", epid);
     return 0;
   }
 
-  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  HASH_FIND(hh, g_endpoints, &endpoint, sizeof(endpoint), ep);
   if ( ep ) {
     struct timespec now, expiry;
 
@@ -259,15 +206,20 @@ static int endpoint_exists(clusterd_endpoint_t epid) {
 }
 
 // If the endpoint was previously added, even if it was expired, this function removes it
-static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
+static void delete_endpoint(int nftfd, clusterd_namespace_t nsid, clusterd_endpoint_t epid) {
   struct mapped_endpoint *ep = NULL;
+  struct ep_key endpoint;
+
+  memset(&endpoint, 0, sizeof(endpoint));
+  endpoint.ns_id = nsid;
+  endpoint.endpoint_id = epid;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not delete endpoint " EP_F ": could not lock mutex", epid);
     return;
   }
 
-  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  HASH_FIND(hh, g_endpoints, &endpoint, sizeof(endpoint), ep);
   if ( ep ) {
     // Delete the rule
     HASH_DEL(g_endpoints, ep);
@@ -300,15 +252,21 @@ static void delete_endpoint(int nftfd, clusterd_endpoint_t epid) {
 
 // This function ensures that the mapped_endpoint record for this
 // endpoint is up-to-date (time is updated)
-static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int newrulehdl, int *oldrulehdl) {
+static void update_endpoint(clusterd_namespace_t nsid, clusterd_endpoint_t epid,
+                            int ttl_ms, int newrulehdl, int *oldrulehdl) {
   struct mapped_endpoint *ep;
+  struct ep_key endpoint;
+
+  memset(&endpoint, 0, sizeof(endpoint));
+  endpoint.ns_id = nsid;
+  endpoint.endpoint_id = epid;
 
   if ( pthread_mutex_lock(&g_endpoint_mutex) != 0 ) {
     CLUSTERD_LOG(CLUSTERD_WARNING, "Could not update endpoint " EP_F ": could not lock mutex", epid);
     return;
   }
 
-  HASH_FIND(hh, g_endpoints, &epid, sizeof(epid), ep);
+  HASH_FIND(hh, g_endpoints, &endpoint, sizeof(endpoint), ep);
   if ( !ep ) {
     ep = malloc(sizeof(struct mapped_endpoint));
     if ( ! ep ) {
@@ -316,9 +274,9 @@ static void update_endpoint(clusterd_endpoint_t epid, int ttl_ms, int newrulehdl
       goto done;
     }
 
-    ep->endpoint_id = epid;
+    memcpy(&ep->endpoint, &endpoint, sizeof(endpoint));
     ep->rule_handle = -1; // Invalid for now until the rule is added
-    HASH_ADD(hh, g_endpoints, endpoint_id, sizeof(ep->endpoint_id), ep);
+    HASH_ADD(hh, g_endpoints, endpoint, sizeof(ep->endpoint), ep);
   }
 
   if ( clock_gettime(CLOCK_MONOTONIC, &ep->last_updated) < 0 ) {
@@ -455,21 +413,22 @@ static int run_nft_command(int nftfd, const char *cmdbuf, int cmdsz, int *rule_h
 
 }
 
-static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t port, char *rulebuf) {
+static int apply_rule(int nftfd, clusterd_namespace_t nsid, clusterd_endpoint_t epid,
+                      int proto, uint16_t port, char *rulebuf) {
   //  char *saveptr, *line;
   char cmdbuf[16*1024], endpointaddr[INET6_ADDRSTRLEN + 1], *save, *psaddr;
   int err, cmdpos, pscnt, i, natrulehdl, oldrulehdl = -1;
 
   const char *processes[128];
 
-  update_endpoint(epid, RULE_TTL_SECONDS * 1000, -1, &oldrulehdl);
+  update_endpoint(nsid, epid, RULE_TTL_SECONDS * 1000, -1, &oldrulehdl);
 
   CLUSTERD_LOG(CLUSTERD_DEBUG, "Got rule for epid=" EP_F ", proto=%d, port=%u:\n%s",
 	       epid, proto, port, rulebuf);
 
   err = snprintf(endpointaddr, sizeof(endpointaddr),
                  CLUSTERD_ENDPOINT_NETWORK_ADDR ":%04x:%04x:%04x:%04x",
-                 HIDWORD(g_nsid), LODWORD(g_nsid), HIDWORD(epid), LODWORD(epid));
+                 HIDWORD(nsid), LODWORD(nsid), HIDWORD(epid), LODWORD(epid));
   if ( err >= sizeof(endpointaddr) ) goto cmd_overflow;
 
   memset(processes, 0, sizeof(processes));
@@ -519,14 +478,15 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
 
   RESET_BUFFER();
   // Add endpoint address to the set
-  WRITE_BUFFER("add element inet %s clusterd-endpoints { %s timeout %ds }\n", g_table_name, endpointaddr, RULE_TTL_SECONDS);
+  WRITE_BUFFER("add element inet %s %s { %s timeout %ds }\n", g_table_name, g_endpoint_set_name,
+               endpointaddr, RULE_TTL_SECONDS);
 
   if ( run_nft_command(nftfd, cmdbuf, cmdpos, NULL) < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not add endpoint to endpoint set: %s", strerror(errno));
     return -1;
   }
 
-  update_endpoint(epid, -1, natrulehdl, NULL);
+  update_endpoint(nsid, epid, -1, natrulehdl, NULL);
 
   return 0;
 
@@ -536,7 +496,7 @@ static int apply_rule(int nftfd, clusterd_endpoint_t epid, int proto, uint16_t p
   return -1;
 }
 
-static int find_and_apply_rule(int nftfd, clusterctl *ctl,
+static int find_and_apply_rule(int nftfd, clusterctl *ctl, clusterd_namespace_t nsid,
                                clusterd_endpoint_t epid, int proto, uint16_t port) {
   static const char *find_endpoint_lua =
     "function get_process_ip(ns, proc)\n"
@@ -583,7 +543,7 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
     return -1;
   }
 
-  err = snprintf(nsidstr, sizeof(nsidstr), NS_F, g_nsid);
+  err = snprintf(nsidstr, sizeof(nsidstr), NS_F, nsid);
   if ( err >= sizeof(nsidstr) ) {
     errno = ENOBUFS;
     return -1;
@@ -601,13 +561,13 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl,
 			       NULL);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup rule (ns=" NS_F ", endpoint=" EP_F ", proto=%s, port=%u)",
-		 g_nsid, epid, protostr, port);
-    delete_endpoint(nftfd, epid);
+		 nsid, epid, protostr, port);
+    delete_endpoint(nftfd, nsid, epid);
     return -1;
   }
 
   // Each line contains a process that could receive data from this endpoint
-  return apply_rule(nftfd, epid, proto, port, rulebuf);
+  return apply_rule(nftfd, nsid, epid, proto, port, rulebuf);
 }
 
 static void *packet_processor_worker(void *data) {
@@ -674,8 +634,8 @@ static void *packet_processor_worker(void *data) {
     }
 
     // Process packet
-    CLUSTERD_LOG(CLUSTERD_DEBUG, "Processing packet (id=%u, endpoint=" EP_F ", proto=%d, port=%u)",
-		 packet->pkt_id, packet->endpoint_id, packet->proto, packet->port);
+    CLUSTERD_LOG(CLUSTERD_DEBUG, "Processing packet (id=%u, ns=" NS_F ", endpoint=" EP_F ", proto=%d, port=%u)",
+		 packet->pkt_id, packet->endpoint.ns_id, packet->endpoint.endpoint_id, packet->proto, packet->port);
 
     verdict = NF_ACCEPT;
 
@@ -692,10 +652,11 @@ static void *packet_processor_worker(void *data) {
     }
 
     // Now, request the rule be added
-    err = find_and_apply_rule(nftfd, &ctl, packet->endpoint_id, packet->proto, packet->port);
+    err = find_and_apply_rule(nftfd, &ctl, packet->endpoint.ns_id, packet->endpoint.endpoint_id,
+                              packet->proto, packet->port);
     if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not find mapping for port (ep=" EP_F ", proto=%d, port=%u)",
-		   packet->endpoint_id, packet->proto, packet->port);
+      CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not find mapping for port (ns=" NS_F ", ep=" EP_F ", proto=%d, port=%u)",
+		   packet->endpoint.ns_id, packet->endpoint.endpoint_id, packet->proto, packet->port);
       verdict = NF_DROP;
       goto apply_verdict;
     } else
@@ -711,7 +672,8 @@ static void *packet_processor_worker(void *data) {
   }
 }
 
-static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t port, int proto) {
+static int enqueue_packet(uint32_t pktid, clusterd_namespace_t nsid, clusterd_endpoint_t epid,
+                          uint16_t port, int proto) {
   int ret = 0;
 
   if ( pthread_mutex_lock(&g_packet_queue_mutex) != 0 )
@@ -728,7 +690,8 @@ static int enqueue_packet(uint32_t pktid, clusterd_endpoint_t epid, uint16_t por
       g_next_packet = g_last_packet = next_packet;
 
     next_packet->pkt_id = pktid;
-    next_packet->endpoint_id = epid;
+    next_packet->endpoint.ns_id = nsid;
+    next_packet->endpoint.endpoint_id = epid;
     next_packet->proto = proto;
     next_packet->port = port;
 
@@ -789,7 +752,7 @@ static int send_verdict(uint32_t pkt_id, int verdict) {
 static int extract_namespace(unsigned char *addr, clusterd_namespace_t *ns) {
   uint32_t netns;
 
-  memcpy(&netns, addr + 8, sizeof(netns));
+  memcpy(&netns, addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN, sizeof(netns));
 
   netns = ntohl(netns);
   *ns = netns;
@@ -816,12 +779,20 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
     // Check if the ip address prefix matches
     if ( memcmp(hdr.daddr.s6_addr, CLUSTERD_ENDPOINT_PREFIX, CLUSTERD_ENDPOINT_PREFIX_BYTELEN) == 0 ) {
       clusterd_endpoint_t epid;
+      clusterd_namespace_t nsid;
 
       struct udphdr udp;
       struct tcphdr tcp;
 
-      memcpy(&epid, hdr.daddr.s6_addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN, 4);
+      memcpy(&epid, hdr.daddr.s6_addr + CLUSTERD_ENDPOINT_PREFIX_BYTELEN + 4, 4);
       epid = ntohl(epid);
+
+      err = extract_namespace(hdr.daddr.s6_addr, &nsid);
+      if ( err < 0 ) {
+        verdict = NF_DROP;
+        CLUSTERD_LOG(CLUSTERD_ERROR, "Could not extract namespace");
+        goto done;
+      }
 
       switch ( hdr.nexthdr ) {
       case IPPROTO_ICMPV6:
@@ -836,10 +807,10 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 	/* Verify that the endpoint exists with the given port */
 	CLUSTERD_LOG(CLUSTERD_DEBUG, "Got TCP packet to port %u", ntohs(tcp.dest));
         /* Check if the endpoint is already mapped */
-        if ( endpoint_exists(epid) )
+        if ( endpoint_exists(nsid, epid) )
           verdict = NF_ACCEPT;
         else {
-          if ( enqueue_packet(id, epid, ntohs(tcp.dest), IPPROTO_TCP) == 0 ) {
+          if ( enqueue_packet(id, nsid, epid, ntohs(tcp.dest), IPPROTO_TCP) == 0 ) {
             verdict = -1;
           } else {
             CLUSTERD_LOG(CLUSTERD_DEBUG, "Could not enqueue TCP packet: %s", strerror(errno));
@@ -852,10 +823,10 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
 	memcpy(&udp, (void *) (p + sizeof(hdr)), sizeof(udp));
 
 	/* Same as TCP */
-	if ( endpoint_exists(epid) )
+	if ( endpoint_exists(nsid, epid) )
           verdict = NF_ACCEPT;
         else {
-          if ( enqueue_packet(id, epid, ntohs(udp.dest), IPPROTO_UDP) == 0 )
+          if ( enqueue_packet(id, nsid, epid, ntohs(udp.dest), IPPROTO_UDP) == 0 )
             verdict = -1;
           else
             verdict = NF_DROP;
@@ -869,7 +840,7 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
     } else {
       clusterd_namespace_t ext;
 
-      err = extract_namespace(&hdr.daddr.s6_addr, &ext);
+      err = extract_namespace(hdr.daddr.s6_addr, &ext);
       if ( err < 0 ) {
         verdict = NF_DROP;
       } else {
@@ -885,6 +856,7 @@ static int process_packet(struct nfqnl_msg_packet_hdr *ph, uint32_t phlen,
   } else
     CLUSTERD_LOG(CLUSTERD_DEBUG, "Packet received in unknown protocol %x", proto);
 
+ done:
   if ( verdict >= 0 ) {
     err = send_verdict(id, verdict);
     if ( err < 0 ) {
@@ -944,67 +916,17 @@ static int queue_cb(const struct nlmsghdr *nlh, void *data) {
   return process_packet(ph, plen, payload, payload_len);
 }
 
-static int lookup_namespace(const char *ns) {
-  static const char lookup_ns_lua[] =
-    "ns = clusterd.resolve_namespace(params.namespace)\n"
-    "if ns == nil then\n"
-    "  error('could not find namespace')\n"
-    "end\n"
-    "clusterd.output(tostring(ns))\n";
-
-  clusterctl ctl;
-  int err, ret = -1;
-  char nsidbuf[128];
-
-  err = clusterctl_open(&ctl);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not open clusterctl connection: %s", strerror(errno));
-    return -1;
-  }
-
-  err = clusterctl_call_simple(&ctl, CLUSTERCTL_CONSISTENT_READS,
-                               lookup_ns_lua,
-                               nsidbuf, sizeof(nsidbuf),
-                               "namespace", ns, NULL);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not lookup namespace: %s", strerror(errno));
-    goto done;
-  }
-
-  err = sscanf(nsidbuf, NS_F, &g_nsid);
-  if ( err != 1 ) {
-    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not read namespace from returned value %s", nsidbuf);
-    goto done;
-  }
-
-  // Now set the lower bits of CLUSTERD_ENDPOINT_PREFIX
-  CLUSTERD_ENDPOINT_PREFIX[8] = (uint8_t) ((g_nsid >> 24) & 0xFF);
-  CLUSTERD_ENDPOINT_PREFIX[9] = (uint8_t) ((g_nsid >> 16) & 0xFF);
-  CLUSTERD_ENDPOINT_PREFIX[10] = (uint8_t) ((g_nsid >> 8) & 0xFF);
-  CLUSTERD_ENDPOINT_PREFIX[11] = (uint8_t) (g_nsid & 0xFF);
-
-  ret = 0;
-
- done:
-  clusterctl_close(&ctl);
-  return ret;
-}
-
 static void usage() {
-  fprintf(stderr, "clusterd-nsportd -- manage an on-demand clusterd namespace port mapping using netfilter\n");
-  fprintf(stderr, "Usage: clusterd-nsportd -vh [-t TABLE] [-N THCNT] [-l QLEN] -s NSFILE -q QUEUENUM\n");
-  fprintf(stderr, "         -n NAMESPACE\n\n");
+  fprintf(stderr, "clusterd-endpointd -- manage an on-demand clusterd endpoint IP mapping using netfilter\n");
+  fprintf(stderr, "Usage: clusterd-endpointd -vh [-t TABLE] [-N THCNT] [-l QLEN] -s NSFILE -q QUEUENUM\n\n");
   fprintf(stderr, "   -t TABLE     The netfilter table that contains the TCP and UDP port maps\n");
   fprintf(stderr, "   -l QLEN      Number of packets that can be enqueued at the same time (100 by default)\n");
-  fprintf(stderr, "   -n NAMESPACE Namespace to use to lookup queries\n");
   fprintf(stderr, "   -N THCNT     Number of threads that run to serve packet requests\n");
   fprintf(stderr, "   -s NSFILE    Name of network namespace file\n");
   fprintf(stderr, "   -q QUEUENUM  The netfilter queue which receives traffic for unknown TCP/UDP ports\n");
   fprintf(stderr, "   -d           Daemonize after starting\n");
   fprintf(stderr, "   -v           Show verbose debug output\n");
   fprintf(stderr, "   -h           Show this help message\n\n");
-  fprintf(stderr, "The TCP and UDP netfilter maps should be declared as such:\n");
-  fprintf(stderr, "  nft add map TABLE MAPNAME '{ type inet_service: verdict; }'\n\n");
   fprintf(stderr, "Please report bugs to support@f-omega.com\n");
 }
 
@@ -1229,13 +1151,6 @@ static struct mnl_socket *start_ns_helper(const char *ns_file, int *nftfd) {
       goto report_error;
     }
     close(nsfd);
-
-    // Reset the NFTables
-    err = flush_tables(g_table_name);
-    if ( err < 0 ) {
-      CLUSTERD_LOG(CLUSTERD_ERROR, "Could not flush nftables");
-      return NULL;
-    }
 
     nft = nft_ctx_new(NFT_CTX_DEFAULT);
     if ( ! nft ) {
@@ -1500,7 +1415,7 @@ static void setup_daemon() {
 
 int main (int argc, char *const *argv) {
   int c, err, pktlen = 100, thcnt = -1, nftfd, daemonize = 0;
-  const char *ns_file = NULL, *namespace = "default";
+  const char *ns_file = NULL;
   struct mnl_socket *nl;
   unsigned int portid;
   sigset_t mask;
@@ -1550,10 +1465,6 @@ int main (int argc, char *const *argv) {
 
     case 's':
       ns_file = optarg;
-      break;
-
-    case 'n':
-      namespace = optarg;
       break;
 
     case 'l':
@@ -1640,12 +1551,6 @@ int main (int argc, char *const *argv) {
   err = allocate_packet_queue(pktlen);
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not allocate packet queue: %s", strerror(errno));
-    return 1;
-  }
-
-  err = lookup_namespace(namespace);
-  if ( err < 0 ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Could not find namespace %s", namespace);
     return 1;
   }
 

@@ -79,8 +79,8 @@ add_executable(clusterd-config src/programs/clusterd-config.c src/programs/confi
 add_executable(clusterd-resource src/programs/clusterd-resource.c)
 target_link_libraries(clusterd-resource clusterctllib)
 
-add_executable(clusterd-nsportd src/programs/clusterd-nsportd.c)
-target_link_libraries(clusterd-nsportd clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${NETFILTER_QUEUE_LIBRARIES} ${MNL_LIBRARIES} ${NFTABLES_LIBRARIES})
+add_executable(clusterd-endpointd src/programs/clusterd-endpointd.c)
+target_link_libraries(clusterd-endpointd clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${NETFILTER_QUEUE_LIBRARIES} ${MNL_LIBRARIES} ${NFTABLES_LIBRARIES})
 
 add_executable(clusterd-schedule src/programs/clusterd-schedule.c)
 target_link_libraries(clusterd-schedule clusterctllib ${CMAKE_THREAD_LIBS_INIT} ${JANSSON_LIBRARIES})
