@@ -579,7 +579,7 @@ function clusterd.new_process(ns, imgpath, options)
 
    new_pid = res[1].ps_id + 1
    _, err = api.run(
-      [[INSERT INTO process(ps_id, ps_image, ps_ns, ps_state, ps_placement)
+      [[INSERT INTO process(ps_id, ps_image, ps_ns, ps_state, ps_placement, ps_ip AS ip)
         VALUES ($id, $img, $ns, $state, $placement)]],
       { id = new_pid, img = imgpath, ns = ns_id,
         state = state, placement = options.placement }
@@ -590,7 +590,7 @@ function clusterd.new_process(ns, imgpath, options)
 
    -- If there's a SIGMASK associated with the process, apply it
    if options.sigmask ~= nil or options.monitors ~= nil then
-     clusterd.update_process(new_pid, { sigmask = options.sigmask, monitors = options.monitors })
+     clusterd.update_process(ns, new_pid, { sigmask = options.sigmask, monitors = options.monitors })
    end
 
    return new_pid
@@ -759,6 +759,18 @@ function clusterd.update_process(ns, pid, options)
       if err ~= nil then
          error('could not update process state: ' .. err)
       end
+   end
+
+   if options.ip ~= nil then
+     _, err = api.run(
+        [[UPDATE process
+          SET    ps_ip=$ip
+          WHERE ps_id=$pid AND ps_ns=$ns]],
+        { ip = opti.nsip, pid = process.ps_id, ns = process.ps_ns }
+     )
+     if err ~= nil then
+       error('could not update process ip: ' .. err)
+     end
    end
 
    if options.sigmask ~= nil then

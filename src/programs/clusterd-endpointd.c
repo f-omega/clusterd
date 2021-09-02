@@ -499,12 +499,6 @@ static int apply_rule(int nftfd, clusterd_namespace_t nsid, clusterd_endpoint_t 
 static int find_and_apply_rule(int nftfd, clusterctl *ctl, clusterd_namespace_t nsid,
                                clusterd_endpoint_t epid, int proto, uint16_t port) {
   static const char *find_endpoint_lua =
-    "function get_process_ip(ns, proc)\n"
-    "   p = string.format('%08x', proc)\n"
-    "   ns = string.format('%08x', ns)\n"
-    "   a = ns:sub(1, 4) .. ':' .. ns:sub(5, 8) .. ':' .. p:sub(1, 4) .. ':' .. p:sub(5, 8)\n"
-    "   return '" CLUSTERD_ENDPOINT_PROCESS_ADDR ":' .. a\n"
-    "end\n"
     "ep = clusterd.get_endpoint(params.namespace, params.endpoint)\n"
     "if ep == nil then\n"
     "  error('could not find endpoint')\n"
@@ -512,7 +506,10 @@ static int find_and_apply_rule(int nftfd, clusterctl *ctl, clusterd_namespace_t 
     "\n"
     "psmap = ''\n"
     "for _, p in ipairs(ep.claims) do\n"
-    "  psmap = psmap .. get_process_ip(ep.namespace, p.process) .. '\\n'\n"
+    "  ps = clusterd.resolve_process(ep.namespace, p.process)\n"
+    "  if ps ~= nil AND ps.ip ~= nil then\n"
+    "    psmap = psmap .. ps.ip .. '\\n'\n"
+    "  end\n"
     "end\n"
     "clusterd.output(psmap);\n";
 

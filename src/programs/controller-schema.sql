@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS process
   , ps_ns         INTEGER NOT NULL
 
   , ps_state      TEXT NOT NULL
+  , ps_ip         TEXT -- Main IP of process on private network
   , ps_placement  TEXT
 
   , PRIMARY KEY(ps_ns, ps_id)
