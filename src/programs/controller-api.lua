@@ -886,8 +886,10 @@ function clusterd.list_global_resources(options)
       condition = ""
    end
 
-   res, err = api.run([[SELECT ]] .. global_resource_projection ..
-                      [[ FROM global_resource]] .. condition, options)
+
+   query = ([[SELECT ]] .. global_resource_projection .. [[ FROM global_resource]] .. condition)
+   clusterd.output(query)
+   res, err = api.run(query, options)
    if err ~= nil then
       error('could not list resources: ' .. err)
    end
@@ -1093,7 +1095,6 @@ function clusterd.update_global_resource(ns, name, options)
    if #cols > 0 then
       query = [[UPDATE global_resource SET ]] .. table.concat(cols, ",") ..
          [[ WHERE gr_ns=$ns AND gr_name=$name ]]
-      clusterd.output(query)
 
       updates.ns = resource.ns
       updates.name = resource.name
