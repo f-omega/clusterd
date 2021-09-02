@@ -1255,7 +1255,7 @@ function clusterd.claim_resource(ns, name, pid)
    _, err = api.run(
       [[REPLACE INTO global_resource_claim(grc_ns, grc_resource, grc_process)
         VALUES ($ns, $name, $proc)]],
-      { ns = resource.ns, name = resource.name, proc = proc }
+      { ns = resource.ns, name = resource.name, proc = proc.ps_id }
    )
    if err ~= nil then
       error('could not claim resource: ' .. err)
