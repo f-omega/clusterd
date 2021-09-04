@@ -3,11 +3,13 @@ let overlay = self: super: {
         name = "raft-canonical-${version}";
         version = "0.10.0";
         src = self.fetchFromGitHub {
-          owner = "canonical";
+          owner = "f-omega";
           repo = "raft";
-          rev = "v0.10.0";
-          sha256 = "Mr/m03/q2p8p4L9IVCtxvwQ8dijqbA/R8Io/Vq5TAqc=";
+          rev = "3fe15a8f06fe13eb7d53d7b0b416fa7bec3680ef";
+          sha256 = "bv745luT5Zj6dKobjG1s9Kc5V8zCwDwV/oI7x4AUETg=";
         };
+
+        buildInputs = old.buildInputs ++ [ self.lz4.dev ];
       });
     };
 

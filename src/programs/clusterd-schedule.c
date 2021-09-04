@@ -421,7 +421,7 @@ static int process_node_line(struct node_entry *node, const char *line, size_t l
 
 static int collect_node_stats(struct node_entry *node) {
   char *ssh_args[] = {
-    "ssh", "-l", "clusterd", node->hostname, g_clusterd_stats_cmd, NULL
+    "ssh", "-l", "clusterd", node->ip, g_clusterd_stats_cmd, NULL
   };
   int stspipe[2], err;
   pid_t child;
