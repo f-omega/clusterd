@@ -68,6 +68,7 @@ static const char *create_process_lua =
   "if node == nil then\n"
   "  error('could not find node')\n"
   "end\n"
+  "clusterd.output(node.ip)\n"
   "clusterd.output(node.hostname)\n"
 
   "pid = clusterd.new_process(params.namespace, params.image,\n"
@@ -331,9 +332,10 @@ static const char *schedule_process(clusterctl *ctl) {
 static int create_process(clusterctl *ctl,
                           const char *namespace, const char *image,
                           const char *pinnednode, clusterd_pid_t *pid,
-                          char *pinnedaddr, size_t pinnedaddrlen) {
+                          char *pinnedaddr, size_t pinnedaddrlen,
+                          char *pinnedname, size_t pinnednamelen) {
   int err;
-  char *pid_start, *pid_end;
+  char *pid_start, *pid_end, *hostname_start;
   char newprocstr[128 + HOST_NAME_MAX];
 
   err = clusterctl_call_simple(ctl, CLUSTERCTL_MAY_WRITE, create_process_lua,
@@ -347,24 +349,41 @@ static int create_process(clusterctl *ctl,
     return -1;
   }
 
-  pid_start = strchr(newprocstr, '\n');
+  hostname_start = strchr(newprocstr, '\n');
+  if ( !hostname_start ) {
+    CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get hostname from create process call");
+    errno = EPROTO;
+    return -1;
+  }
+
+  *hostname_start = 0;
+
+  pid_start = strchr(hostname_start + 1, '\n');
   if ( !pid_start ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not get pid from create process call");
     errno = EPROTO;
     return -1;
   }
 
-  *pid_start = '\0';
+  *pid_start = 0;
+
+  if ( (hostname_start - newprocstr) >= pinnednamelen ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot fit node address %s into buffer", newprocstr);
+    errno = ENAMETOOLONG;
+  }
 
   // Read the node address
-  if ( (pid_start - newprocstr) >= pinnedaddrlen ) {
-    CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot fit node address %s into buffer", newprocstr);
+  if ( (pid_start - hostname_start) >= pinnednamelen ) {
+    CLUSTERD_LOG(CLUSTERD_ERROR, "Cannot fit node name %s into buffer", hostname_start);
     errno = ENAMETOOLONG;
     return -1;
   }
 
-  strncpy(pinnedaddr, newprocstr, pinnedaddrlen);
+  hostname_start++;
   pid_start ++;
+
+  strncpy(pinnedaddr, newprocstr, pinnedaddrlen);
+  strncpy(pinnedname, hostname_start, pinnednamelen);
 
   errno = 0;
   *pid = strtol(pid_start, &pid_end, 10);
@@ -466,9 +485,6 @@ static int launch_service(clusterctl *ctl, const char *nodeaddr,
     errno = ENOMEM;
     return -1;
   }
-
-  CLUSTERD_LOG(CLUSTERD_DEBUG, "Launching service %s with %d argument(s) on %s",
-               image, argc, nodeaddr);
 
   // If the node hostname matches our hostname, then we don't need to
   // use ssh
@@ -618,7 +634,7 @@ int main(int argc, char *const *argv) {
   clusterd_pid_t pid;
   clusterctl ctl;
 
-  char pinnednodeaddr[HOST_NAME_MAX];
+  char pinnednodeaddr[HOST_NAME_MAX], pinnednodename[HOST_NAME_MAX];
 
   setlocale(LC_ALL, "C");
   srandom(time(NULL));
@@ -765,7 +781,8 @@ int main(int argc, char *const *argv) {
   /* First we find the service and make sure it exists, and create a
    * process in the scheduling state */
   err = create_process(&ctl, namespace, image, pinnednode, &pid,
-                       pinnednodeaddr, sizeof(pinnednodeaddr));
+                       pinnednodeaddr, sizeof(pinnednodeaddr),
+                       pinnednodename, sizeof(pinnednodename));
   /* Read the pid and maybe the node id */
   if ( err < 0 ) {
     CLUSTERD_LOG(CLUSTERD_CRIT, "Could not create process: %s", strerror(errno));
@@ -805,6 +822,9 @@ int main(int argc, char *const *argv) {
     CLUSTERD_LOG(CLUSTERD_ERROR, "Could not copy image to host %s", nodeaddr);
     goto cleanup;
   }
+
+  CLUSTERD_LOG(CLUSTERD_DEBUG, "Launching service %s with %d argument(s) on %s(%s) with pid " PID_F,
+               image, argc - firstarg, pinnednodename, nodeaddr, pid);
 
   err = launch_service(&ctl, nodeaddr, namespace, image, pid,
                        keep_logs, redirect_stdin || redirect_stdout,
